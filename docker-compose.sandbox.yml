@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  # Traefik reverse proxy for routing sandbox instances
+  traefik:
+    image: traefik:v2.10
+    container_name: sandbox-traefik
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--log.level=INFO"
+    ports:
+      - "8080:80"      # Sandbox preview port
+      - "8081:8080"    # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - sandbox-network
+    restart: unless-stopped
+
+networks:
+  sandbox-network:
+    driver: bridge
+    name: sandbox-network
+
+# Individual sandbox containers will be created programmatically
+# Example sandbox service structure:
+#
+# sandbox-{session-id}:
+#   build:
+#     context: .
+#     dockerfile: Dockerfile.sandbox
+#   container_name: sandbox-{session-id}
+#   environment:
+#     - NODE_ENV=development
+#     - SESSION_ID={session-id}
+#   volumes:
+#     - ./sandbox-instances/{session-id}/app:/app/app:ro
+#     - /app/node_modules
+#     - /app/.next
+#   networks:
+#     - sandbox-network
+#   labels:
+#     - "traefik.enable=true"
+#     - "traefik.http.routers.sandbox-{session-id}.rule=Host(`localhost`) && PathPrefix(`/sandbox/{session-id}`)"
+#     - "traefik.http.services.sandbox-{session-id}.loadbalancer.server.port=3000"
+#     - "traefik.http.middlewares.sandbox-{session-id}-strip.stripprefix.prefixes=/sandbox/{session-id}"
+#     - "traefik.http.routers.sandbox-{session-id}.middlewares=sandbox-{session-id}-strip"
+#   deploy:
+#     resources:
+#       limits:
+#         cpus: '0.5'
+#         memory: 512M
+#       reservations:
+#         cpus: '0.25'
+#         memory: 256M
+#   restart: unless-stopped
+#   healthcheck:
+#     test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+#     interval: 10s
+#     timeout: 5s
+#     retries: 3
+#     start_period: 30s

@@ -1,0 +1,72 @@
+# Dockerfile for Next.js 14 Sandbox Environment
+# Optimized for fast startup with pre-installed dependencies
+
+FROM node:20-alpine AS base
+
+# Install dependencies only when needed
+FROM base AS deps
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+# Copy package files
+COPY sandbox-template/package.json sandbox-template/package-lock.json* ./
+RUN npm install --legacy-peer-deps
+
+# Development image for hot reload
+FROM base AS runner
+WORKDIR /app
+
+ENV NODE_ENV=development
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+# Copy node_modules from deps stage
+COPY --from=deps /app/node_modules ./node_modules
+
+# Copy the template structure
+COPY --chown=nextjs:nodejs sandbox-template/package.json ./package.json
+COPY --chown=nextjs:nodejs sandbox-template/next.config.mjs ./next.config.mjs
+COPY --chown=nextjs:nodejs sandbox-template/tsconfig.json ./tsconfig.json
+COPY --chown=nextjs:nodejs sandbox-template/tailwind.config.js ./tailwind.config.js
+COPY --chown=nextjs:nodejs sandbox-template/postcss.config.js ./postcss.config.js
+COPY --chown=nextjs:nodejs sandbox-template/app ./app
+
+# Create user-project directory
+RUN mkdir -p /app/user-project && chown nextjs:nodejs /app/user-project
+
+USER nextjs
+
+EXPOSE 3000
+
+# Health check endpoint
+HEALTHCHECK --interval=5s --timeout=3s --start-period=30s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:3000/api/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+
+# Create a startup script that checks for user project
+COPY --chown=nextjs:nodejs <<'EOF' /app/start.sh
+#!/bin/sh
+# Check if user project exists and has package.json
+if [ -f "/app/user-project/package.json" ]; then
+  echo "User project detected, starting from /app/user-project"
+  cd /app/user-project
+  # Check if node_modules exists, if not install
+  if [ ! -d "node_modules" ]; then
+    echo "Installing dependencies..."
+    npm install --legacy-peer-deps
+  fi
+  exec npm run dev
+else
+  echo "No user project found, starting template"
+  cd /app
+  exec npm run dev
+fi
+EOF
+
+RUN chmod +x /app/start.sh
+
+# Start the development server
+CMD ["/app/start.sh"]

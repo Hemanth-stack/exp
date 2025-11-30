@@ -5,9 +5,13 @@ export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
   email: varchar('email', { length: 255 }).notNull().unique(),
   name: varchar('name', { length: 255 }).notNull(),
-  passwordHash: text('password_hash').notNull(),
+  passwordHash: text('password_hash'),
   subscriptionTier: varchar('subscription_tier', { length: 50 }).notNull().default('free'),
   maxProjects: integer('max_projects').notNull().default(3),
+  // GitHub OAuth fields
+  githubId: varchar('github_id', { length: 255 }),
+  githubUsername: varchar('github_username', { length: 255 }),
+  githubAccessToken: text('github_access_token'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
 });
 
@@ -19,6 +23,9 @@ export const projects = pgTable('projects', {
   template: varchar('template', { length: 100 }).notNull(),
   status: varchar('status', { length: 50 }).notNull().default('created'),
   gitRepoPath: text('git_repo_path'),
+  // GitHub repository info
+  githubRepoUrl: text('github_repo_url'),
+  githubRepoName: varchar('github_repo_name', { length: 255 }),
   containerId: text('container_id'),
   containerPort: integer('container_port'),
   createdAt: timestamp('created_at').notNull().defaultNow(),

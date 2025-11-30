@@ -6,6 +6,8 @@ declare module 'next-auth' {
       id: string;
       subscriptionTier: string;
       maxProjects: number;
+      githubAccessToken?: string;
+      githubUsername?: string;
     } & DefaultSession['user'];
   }
 
@@ -15,6 +17,8 @@ declare module 'next-auth' {
     name: string;
     subscriptionTier: string;
     maxProjects: number;
+    githubAccessToken?: string | null;
+    githubUsername?: string | null;
   }
 }
 
@@ -23,5 +27,7 @@ declare module 'next-auth/jwt' {
     id: string;
     subscriptionTier: string;
     maxProjects: number;
+    githubAccessToken?: string;
+    githubUsername?: string;
   }
 }

@@ -24,6 +24,13 @@ import {
   Code,
   Save,
   X,
+  History,
+  RotateCcw,
+  Github,
+  GitBranch,
+  ChevronDown,
+  ChevronUp,
+  RefreshCcw,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -36,6 +43,21 @@ interface Message {
   createdAt: Date;
   filesCreated?: string[];  // Track files created by this message
   isCodeResponse?: boolean; // Flag for responses that generated code
+  error?: boolean; // Flag for error responses
+}
+
+interface GitCommit {
+  hash: string;
+  date: string;
+  message: string;
+  author_name: string;
+}
+
+interface GitHubStatus {
+  isConnected: boolean;
+  githubUsername?: string;
+  repoUrl?: string;
+  repoName?: string;
 }
 
 // Helper function to extract chat-friendly message (without full code blocks)
@@ -122,6 +144,17 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   
+  // Git history states
+  const [showGitHistory, setShowGitHistory] = useState(false);
+  const [gitCommits, setGitCommits] = useState<GitCommit[]>([]);
+  const [isLoadingCommits, setIsLoadingCommits] = useState(false);
+  const [isReverting, setIsReverting] = useState(false);
+  
+  // GitHub integration states
+  const [githubStatus, setGithubStatus] = useState<GitHubStatus>({ isConnected: false });
+  const [isPushingToGithub, setIsPushingToGithub] = useState(false);
+  const [isSyncingToGithub, setIsSyncingToGithub] = useState(false);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -139,6 +172,7 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
       fetchFiles();
       fetchConversationHistory();
       checkPreviewStatus();
+      fetchGitHubStatus();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, projectId]);
@@ -150,6 +184,169 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
+
+  const fetchGitHubStatus = async () => {
+    try {
+      const response = await fetch(`/api/projects/${projectId}/github`);
+      if (response.ok) {
+        const data = await response.json();
+        setGithubStatus(data);
+      }
+    } catch (error) {
+      console.error('Error fetching GitHub status:', error);
+    }
+  };
+
+  const fetchGitCommits = async () => {
+    setIsLoadingCommits(true);
+    try {
+      const response = await fetch(`/api/projects/${projectId}/git?action=log`);
+      if (response.ok) {
+        const data = await response.json();
+        setGitCommits(data.commits || []);
+      }
+    } catch (error) {
+      console.error('Error fetching git commits:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to fetch commit history',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsLoadingCommits(false);
+    }
+  };
+
+  const handleRevertToCommit = async (commitSha: string, commitMessage: string) => {
+    if (!confirm(`Revert to commit: "${commitMessage}"? This will discard all changes after this commit.`)) {
+      return;
+    }
+    
+    setIsReverting(true);
+    try {
+      const response = await fetch(`/api/projects/${projectId}/git`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'revert', commitSha }),
+      });
+
+      if (response.ok) {
+        toast({
+          title: 'Reverted successfully',
+          description: `Reverted to: ${commitMessage}`,
+        });
+        // Refresh files and preview
+        fetchFiles();
+        setOpenTabs([]);
+        setActiveTab(null);
+        if (previewStatus === 'running') {
+          setTimeout(() => setPreviewKey(prev => prev + 1), 500);
+        }
+        fetchGitCommits();
+      } else {
+        throw new Error('Failed to revert');
+      }
+    } catch {
+      toast({
+        title: 'Error',
+        description: 'Failed to revert to commit',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsReverting(false);
+    }
+  };
+
+  const handlePushToGitHub = async () => {
+    setIsPushingToGithub(true);
+    try {
+      const response = await fetch(`/api/projects/${projectId}/github`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'push' }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        toast({
+          title: 'Pushed to GitHub!',
+          description: `Repository: ${data.repo.fullName}`,
+        });
+        fetchGitHubStatus();
+      } else {
+        const error = await response.json();
+        throw new Error(error.error);
+      }
+    } catch (error) {
+      toast({
+        title: 'Push failed',
+        description: error instanceof Error ? error.message : 'Failed to push to GitHub',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsPushingToGithub(false);
+    }
+  };
+
+  const handleSyncToGitHub = async () => {
+    setIsSyncingToGithub(true);
+    try {
+      const response = await fetch(`/api/projects/${projectId}/github`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'sync' }),
+      });
+
+      if (response.ok) {
+        toast({
+          title: 'Synced to GitHub!',
+          description: 'Changes pushed successfully',
+        });
+      } else {
+        const error = await response.json();
+        throw new Error(error.error);
+      }
+    } catch (error) {
+      toast({
+        title: 'Sync failed',
+        description: error instanceof Error ? error.message : 'Failed to sync to GitHub',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsSyncingToGithub(false);
+    }
+  };
+
+  const [pendingRetryMessage, setPendingRetryMessage] = useState<string | null>(null);
+  
+  const handleRetryMessage = (messageContent: string) => {
+    // Remove the last assistant message if it exists
+    setMessages(prev => {
+      const lastMessage = prev[prev.length - 1];
+      if (lastMessage?.role === 'assistant') {
+        return prev.slice(0, -1);
+      }
+      return prev;
+    });
+    
+    // Set the pending retry message
+    setPendingRetryMessage(messageContent);
+  };
+
+  // Handle pending retry message
+  useEffect(() => {
+    if (pendingRetryMessage && !isStreaming) {
+      setInputValue(pendingRetryMessage);
+      setPendingRetryMessage(null);
+      // Trigger send after a tick to ensure state is updated
+      setTimeout(() => {
+        const sendBtn = document.querySelector('[data-send-button]') as HTMLButtonElement;
+        if (sendBtn && !sendBtn.disabled) {
+          sendBtn.click();
+        }
+      }, 100);
+    }
+  }, [pendingRetryMessage, isStreaming]);
 
   const fetchProject = async () => {
     try {
@@ -698,6 +895,16 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {githubStatus.repoUrl && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => window.open(githubStatus.repoUrl!, '_blank')}
+              >
+                <Github className="h-4 w-4 mr-2" />
+                View Repo
+              </Button>
+            )}
             {deploymentUrl && (
               <Button
                 variant="outline"
@@ -706,6 +913,26 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
               >
                 <ExternalLink className="h-4 w-4 mr-2" />
                 View Live
+              </Button>
+            )}
+            {githubStatus.isConnected && !githubStatus.repoUrl && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handlePushToGitHub}
+                disabled={isPushingToGithub}
+              >
+                {isPushingToGithub ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Pushing...
+                  </>
+                ) : (
+                  <>
+                    <Github className="h-4 w-4 mr-2" />
+                    Push to GitHub
+                  </>
+                )}
               </Button>
             )}
             <Button onClick={handleDeploy} disabled={isDeploying} size="sm">
@@ -729,9 +956,134 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
         {/* Left Panel - Chat (30%) */}
         <div className="border-r bg-card" style={{ width: '30%' }}>
           <div className="h-full flex flex-col">
-            <div className="p-3 border-b">
+            <div className="p-3 border-b flex items-center justify-between">
               <h2 className="font-semibold">AI Assistant</h2>
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setShowGitHistory(!showGitHistory);
+                    if (!showGitHistory) {
+                      fetchGitCommits();
+                    }
+                  }}
+                  className="h-8 px-2"
+                  title="View commit history"
+                >
+                  <History className="h-4 w-4" />
+                </Button>
+                {githubStatus.isConnected ? (
+                  githubStatus.repoUrl ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleSyncToGitHub}
+                      disabled={isSyncingToGithub}
+                      className="h-8 px-2"
+                      title="Sync to GitHub"
+                    >
+                      {isSyncingToGithub ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-4 w-4" />
+                      )}
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handlePushToGitHub}
+                      disabled={isPushingToGithub}
+                      className="h-8 px-2"
+                      title="Push to GitHub"
+                    >
+                      {isPushingToGithub ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Github className="h-4 w-4" />
+                      )}
+                    </Button>
+                  )
+                ) : null}
+              </div>
             </div>
+            
+            {/* Git History Panel */}
+            {showGitHistory && (
+              <div className="border-b bg-muted/30 p-3 max-h-48 overflow-hidden">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <GitBranch className="h-4 w-4" />
+                    <span className="text-sm font-medium">Commit History</span>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setShowGitHistory(false)}
+                    className="h-6 w-6 p-0"
+                  >
+                    <ChevronUp className="h-4 w-4" />
+                  </Button>
+                </div>
+                
+                {githubStatus.repoUrl && (
+                  <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
+                    <Github className="h-3 w-3" />
+                    <a
+                      href={githubStatus.repoUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:underline"
+                    >
+                      {githubStatus.repoName}
+                    </a>
+                  </div>
+                )}
+                
+                <ScrollArea className="h-32">
+                  {isLoadingCommits ? (
+                    <div className="flex justify-center py-4">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    </div>
+                  ) : gitCommits.length === 0 ? (
+                    <p className="text-xs text-muted-foreground text-center py-2">No commits yet</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {gitCommits.slice(0, 10).map((commit, index) => (
+                        <div
+                          key={commit.hash}
+                          className="flex items-start justify-between gap-2 p-2 rounded bg-background hover:bg-muted/50 group"
+                        >
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-medium truncate">{commit.message}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {new Date(commit.date).toLocaleDateString()} · {commit.hash.slice(0, 7)}
+                            </p>
+                          </div>
+                          {index > 0 && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleRevertToCommit(commit.hash, commit.message)}
+                              disabled={isReverting}
+                              className="h-6 px-2 opacity-0 group-hover:opacity-100 transition-opacity"
+                              title="Revert to this commit"
+                            >
+                              {isReverting ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <RotateCcw className="h-3 w-3" />
+                              )}
+                            </Button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </ScrollArea>
+              </div>
+            )}
             
             <ScrollArea className="flex-1 p-4">
               <div className="space-y-4">
@@ -745,7 +1097,7 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                     <p className="text-sm">Ask AI to help you build your app!</p>
                   </div>
                 ) : (
-                  messages.map((message) => (
+                  messages.map((message, index) => (
                     <div
                       key={message.id}
                       className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
@@ -778,6 +1130,35 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                                 </button>
                               ))}
                             </div>
+                          </div>
+                        )}
+                        {/* Retry button for user messages */}
+                        {message.role === 'user' && index === messages.length - 2 && !isStreaming && (
+                          <div className="mt-2 pt-2 border-t border-border/50">
+                            <button
+                              onClick={() => handleRetryMessage(message.content)}
+                              className="text-xs px-2 py-1 bg-background/50 hover:bg-background rounded border flex items-center gap-1 transition-colors"
+                            >
+                              <RefreshCcw className="h-3 w-3" />
+                              Retry
+                            </button>
+                          </div>
+                        )}
+                        {/* Retry button for the last assistant message */}
+                        {message.role === 'assistant' && index === messages.length - 1 && !isStreaming && messages.length >= 2 && (
+                          <div className="mt-2 pt-2 border-t border-border/50 flex gap-2">
+                            <button
+                              onClick={() => {
+                                const userMessage = messages[messages.length - 2];
+                                if (userMessage?.role === 'user') {
+                                  handleRetryMessage(userMessage.content);
+                                }
+                              }}
+                              className="text-xs px-2 py-1 bg-background/50 hover:bg-background rounded border flex items-center gap-1 transition-colors"
+                            >
+                              <RefreshCcw className="h-3 w-3" />
+                              Regenerate response
+                            </button>
                           </div>
                         )}
                       </div>
@@ -854,6 +1235,7 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                     disabled={!inputValue.trim()}
                     size="icon"
                     className="shrink-0"
+                    data-send-button="true"
                   >
                     <Send className="h-4 w-4" />
                   </Button>

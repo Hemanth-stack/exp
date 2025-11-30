@@ -2,10 +2,11 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-config';
 import { db } from '@/db';
-import { projects } from '@/db/schema';
+import { projects, users } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { gitManager } from '@/lib/git-manager';
+import { createGitHubService } from '@/lib/github-service';
 
 const createProjectSchema = z.object({
   name: z.string().min(1).max(255),
@@ -73,14 +74,48 @@ export async function POST(request: Request) {
       .returning();
 
     // Initialize git repository
+    let repoPath: string | null = null;
     try {
-      const repoPath = await gitManager.initRepository(newProject.id, template);
+      repoPath = await gitManager.initRepository(newProject.id, template);
       await db
         .update(projects)
         .set({ gitRepoPath: repoPath })
         .where(eq(projects.id, newProject.id));
     } catch (error) {
       console.error('Error initializing git repository:', error);
+    }
+
+    // Auto-push to GitHub if user has GitHub connected
+    try {
+      const [user] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, session.user.id))
+        .limit(1);
+
+      if (user?.githubAccessToken && user?.githubUsername && repoPath) {
+        const githubService = createGitHubService(user.githubAccessToken, user.githubUsername);
+        const repoName = `ai-app-${name.toLowerCase().replace(/\s+/g, '-')}-${newProject.id.slice(0, 8)}`;
+        
+        const repo = await githubService.pushLocalRepoToGitHub(
+          repoPath,
+          repoName,
+          description
+        );
+
+        await db
+          .update(projects)
+          .set({
+            githubRepoUrl: repo.html_url,
+            githubRepoName: repo.name,
+          })
+          .where(eq(projects.id, newProject.id));
+
+        console.log(`Auto-pushed project to GitHub: ${repo.html_url}`);
+      }
+    } catch (error) {
+      console.error('Error auto-pushing to GitHub:', error);
+      // Don't fail the project creation if GitHub push fails
     }
 
     return NextResponse.json(newProject, { status: 201 });

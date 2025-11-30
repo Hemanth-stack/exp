@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useToast } from '@/components/ui/use-toast';
 import { FileExplorer } from '@/components/file-explorer';
+import { AgentProgress, type AgentStep } from '@/components/AgentProgress';
 import { 
   ArrowLeft, 
   Send, 
@@ -154,6 +155,10 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
   const [githubStatus, setGithubStatus] = useState<GitHubStatus>({ isConnected: false });
   const [isPushingToGithub, setIsPushingToGithub] = useState(false);
   const [isSyncingToGithub, setIsSyncingToGithub] = useState(false);
+  
+  // Agent progress states
+  const [agentSteps, setAgentSteps] = useState<AgentStep[]>([]);
+  const [agentProgressCollapsed, setAgentProgressCollapsed] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -684,6 +689,8 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
     setInputValue('');
     setIsStreaming(true);
     setCurrentMessage('');
+    setAgentSteps([]); // Reset steps for new message
+    setAgentProgressCollapsed(false); // Expand progress view
 
     const newMessage: Message = {
       id: Date.now().toString(),
@@ -733,8 +740,11 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
             try {
               const data = JSON.parse(line.slice(6));
               
-              if (data.type === 'status') {
-                // Show status updates
+              if (data.type === 'step') {
+                // Handle step updates
+                setAgentSteps(prev => [...prev, data as AgentStep]);
+              } else if (data.type === 'status') {
+                // Legacy status updates - convert to step format
                 setCurrentMessage(data.message || 'Processing...');
               } else if (data.type === 'text' && data.content) {
                 // Append streamed text
@@ -746,8 +756,9 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                 if (data.file?.path) {
                   createdFiles.push(data.file.path);
                 }
+                const action = data.action === 'updated' ? '📝 Updated' : '✅ Created';
                 toast({
-                  title: '✅ File created',
+                  title: `${action}`,
                   description: data.file?.path || 'file',
                 });
               } else if (data.type === 'error') {
@@ -774,6 +785,11 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                 };
                 setMessages(prev => [...prev, assistantMessage]);
                 setCurrentMessage('');
+                
+                // Auto-collapse progress after completion
+                setTimeout(() => {
+                  setAgentProgressCollapsed(true);
+                }, 1500);
                 
                 if (data.filesCreated > 0) {
                   fetchFiles();
@@ -1166,6 +1182,18 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                   ))
                 )}
                 
+                {/* Agent Progress Steps */}
+                {(isStreaming || agentSteps.length > 0) && (
+                  <div className="mb-4">
+                    <AgentProgress
+                      steps={agentSteps}
+                      isStreaming={isStreaming}
+                      collapsed={agentProgressCollapsed}
+                      onToggleCollapse={() => setAgentProgressCollapsed(!agentProgressCollapsed)}
+                    />
+                  </div>
+                )}
+                
                 {/* Streaming message display */}
                 {isStreaming && currentMessage && (
                   <div className="flex justify-start">
@@ -1178,8 +1206,8 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                   </div>
                 )}
                 
-                {/* Loading indicator when no message yet */}
-                {isStreaming && !currentMessage && (
+                {/* Loading indicator when no message yet - only show if no steps */}
+                {isStreaming && !currentMessage && agentSteps.length === 0 && (
                   <div className="flex justify-start">
                     <div className="rounded-lg p-3 bg-muted flex items-center gap-2">
                       <Loader2 className="h-4 w-4 animate-spin" />

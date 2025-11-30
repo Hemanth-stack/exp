@@ -8,15 +8,133 @@ import { anthropic } from '@ai-sdk/anthropic';
 import { streamText } from 'ai';
 import fs from 'fs/promises';
 import path from 'path';
+import { 
+  getProjectContext, 
+  getFileContext,
+  formatContextForPrompt,
+  formatFileContextForModification 
+} from '@/lib/code-context';
 
 // Detect intent from message
 function detectIntent(message: string): {
-  type: 'generate' | 'debug' | 'analyze' | 'improve' | 'general';
+  type: 'generate' | 'debug' | 'analyze' | 'improve' | 'modify' | 'architect' | 'test' | 'security' | 'docs' | 'deploy' | 'review' | 'general';
+  targetFile?: string;
   confidence: number;
 } {
   const lower = message.toLowerCase();
   
-  // Generation keywords
+  // Check for file modification intent
+  const fileMatch = message.match(/(?:modify|change|update|edit)\s+(?:the\s+)?(?:file\s+)?([^\s]+\.tsx?)/i) 
+    || message.match(/### FILE:\s*([^\n]+)/i)
+    || message.match(/(?:in|for)\s+([^\s]+\.tsx?)/i);
+  
+  // Architecture/Planning keywords
+  if (
+    lower.includes('architect') ||
+    lower.includes('plan') ||
+    lower.includes('design system') ||
+    lower.includes('structure') ||
+    lower.includes('how should i build') ||
+    lower.includes('what components')
+  ) {
+    return { type: 'architect', confidence: 0.9 };
+  }
+
+  // Testing keywords
+  if (
+    lower.includes('test') ||
+    lower.includes('testing') ||
+    lower.includes('write tests') ||
+    lower.includes('unit test') ||
+    lower.includes('integration test') ||
+    lower.includes('spec')
+  ) {
+    return { 
+      type: 'test', 
+      targetFile: fileMatch?.[1],
+      confidence: 0.9 
+    };
+  }
+
+  // Security keywords
+  if (
+    lower.includes('security') ||
+    lower.includes('vulnerability') ||
+    lower.includes('secure') ||
+    lower.includes('audit') ||
+    lower.includes('xss') ||
+    lower.includes('injection') ||
+    lower.includes('authentication')
+  ) {
+    return { 
+      type: 'security', 
+      targetFile: fileMatch?.[1],
+      confidence: 0.9 
+    };
+  }
+
+  // Documentation keywords
+  if (
+    lower.includes('document') ||
+    lower.includes('readme') ||
+    lower.includes('jsdoc') ||
+    lower.includes('comment') ||
+    lower.includes('explain the code') ||
+    lower.includes('api docs')
+  ) {
+    return { 
+      type: 'docs', 
+      targetFile: fileMatch?.[1],
+      confidence: 0.85 
+    };
+  }
+
+  // Deployment keywords
+  if (
+    lower.includes('deploy') ||
+    lower.includes('deployment') ||
+    lower.includes('docker') ||
+    lower.includes('ci/cd') ||
+    lower.includes('vercel') ||
+    lower.includes('production') ||
+    lower.includes('github actions')
+  ) {
+    return { type: 'deploy', confidence: 0.9 };
+  }
+
+  // Code Review keywords
+  if (
+    lower.includes('review my code') ||
+    lower.includes('code review') ||
+    lower.includes('pr review') ||
+    lower.includes('feedback on') ||
+    lower.includes('critique')
+  ) {
+    return { 
+      type: 'review', 
+      targetFile: fileMatch?.[1],
+      confidence: 0.9 
+    };
+  }
+
+  // Modification keywords (updating existing code)
+  if (
+    (lower.includes('modify') ||
+    lower.includes('change') ||
+    lower.includes('update') ||
+    lower.includes('edit') ||
+    lower.includes('add to') ||
+    lower.includes('remove from')) &&
+    !lower.includes('create')
+  ) {
+    return { 
+      type: 'modify', 
+      targetFile: fileMatch?.[1],
+      confidence: 0.9 
+    };
+  }
+  
+  // Generation keywords (new code)
   if (
     lower.includes('create') ||
     lower.includes('generate') ||
@@ -35,13 +153,16 @@ function detectIntent(message: string): {
     lower.includes('broken') ||
     lower.includes('not working')
   ) {
-    return { type: 'debug', confidence: 0.85 };
+    return { 
+      type: 'debug', 
+      targetFile: fileMatch?.[1],
+      confidence: 0.85 
+    };
   }
   
   // Analysis keywords
   if (
     lower.includes('analyze') ||
-    lower.includes('review') ||
     lower.includes('check') ||
     lower.includes('inspect')
   ) {
@@ -53,9 +174,14 @@ function detectIntent(message: string): {
     lower.includes('improve') ||
     lower.includes('optimize') ||
     lower.includes('enhance') ||
-    lower.includes('better')
+    lower.includes('better') ||
+    lower.includes('refactor')
   ) {
-    return { type: 'improve', confidence: 0.8 };
+    return { 
+      type: 'improve', 
+      targetFile: fileMatch?.[1],
+      confidence: 0.8 
+    };
   }
   
   return { type: 'generate', confidence: 0.5 }; // Default to generation
@@ -156,82 +282,147 @@ function parseMultipleFiles(response: string): Array<{
 }
 
 // Get system prompt based on intent
-function getSystemPrompt(intentType: string): string {
-  const basePrompt = `You are an expert React and Next.js code generator. Your role is to generate complete, functional React components and help edit existing code.
+function getSystemPrompt(intentType: string, hasContext: boolean = false): string {
+  const contextNote = hasContext 
+    ? `\n\n## CONTEXT PROVIDED
+You have been given the current project files. Use this context to:
+1. Understand the existing code structure and patterns
+2. Maintain consistency with existing styling and conventions  
+3. Properly import from and integrate with existing components
+4. Avoid duplicating existing functionality` 
+    : '';
 
-## RULES:
-1. ALWAYS provide complete, working code that can be directly saved to a file
-2. Use TypeScript with proper typing
-3. Use Tailwind CSS for all styling (the project has Tailwind configured)
-4. For Next.js App Router, use 'use client' directive when component uses hooks or browser APIs
-5. Make components self-contained - include all necessary imports
+  const basePrompt = `# IDENTITY & PURPOSE
+You are a world-class senior full-stack engineer specializing in React 18+, Next.js 14+ App Router, and TypeScript 5+. You write production-ready, maintainable code that follows industry best practices.
 
-## MULTI-FILE SUPPORT:
-When creating or editing multiple files, use this format for EACH file:
+## CORE RULES
+1. ✅ ALWAYS provide COMPLETE, working code that can be directly saved
+2. ✅ Use TypeScript with explicit types (no \`any\` unless absolutely necessary)
+3. ✅ Use Tailwind CSS for all styling
+4. ✅ Use 'use client' directive ONLY when using hooks or browser APIs
+5. ✅ Include ALL necessary imports
+6. ❌ NEVER leave TODO comments or placeholder code
+7. ❌ NEVER omit error handling or loading states
+
+## MULTI-FILE FORMAT
+When creating or editing files, use this EXACT format:
 
 ### FILE: app/components/ComponentName.tsx
 \`\`\`tsx
-// code here
+// complete code here
 \`\`\`
 
 ### FILE: app/page.tsx  
 \`\`\`tsx
-// code here
+// complete code here
 \`\`\`
 
-## RESPONSE FORMAT:
-1. Start with a VERY brief description (1 sentence max)
-2. Immediately provide the complete code for each file using the ### FILE: format
-3. Keep explanations minimal - focus on code`;
+## RESPONSE FORMAT
+1. Brief description (1-2 sentences max)
+2. Complete code for each file using ### FILE: format
+3. No additional explanation after code${contextNote}`;
 
   switch (intentType) {
-    case 'debug':
-      return `You are an expert code debugger for React, Next.js, and TypeScript.
+    case 'modify':
+      return `# IDENTITY & PURPOSE  
+You are a world-class code modification specialist. Your job is to surgically update existing code while preserving all functionality that shouldn't change.
 
-## YOUR ROLE:
-1. Analyze code issues carefully
-2. Identify root causes, not just symptoms  
-3. Provide working fixes with clear explanations
-4. Fix single or multiple files as needed
+## CRITICAL MODIFICATION RULES
+1. ✅ READ the existing code carefully before making changes
+2. ✅ PRESERVE all existing functionality unless explicitly asked to remove it
+3. ✅ MAINTAIN the existing code style and patterns
+4. ✅ UPDATE imports if you add new dependencies
+5. ✅ Provide the COMPLETE modified file (not just changed parts)
+6. ❌ NEVER remove existing features accidentally
+7. ❌ NEVER break existing imports or exports
 
-## MULTI-FILE FIX FORMAT:
-When fixing multiple files, use this format:
+## MODIFICATION APPROACH
+<thinking>
+1. What specific change is being requested?
+2. What existing code must be preserved?
+3. What new code needs to be added/changed?
+4. Are there any imports that need updating?
+5. Will this change affect other files?
+</thinking>
 
-### FILE: app/components/BrokenComponent.tsx
+## OUTPUT FORMAT
+### FILE: [exact path of modified file]
 \`\`\`tsx
-// fixed code here
+// complete modified file - NOT just the changed parts
 \`\`\`
 
-## RESPONSE FORMAT:
-1. Brief issue description (1 line)
-2. Fixed code using ### FILE: format
-3. Keep it concise`;
+If the modification requires changes to multiple files, include all of them.${contextNote}`;
+
+    case 'debug':
+      return `# IDENTITY & PURPOSE
+You are an expert debugger who finds root causes, not just symptoms. You fix code completely and explain why the issue occurred.
+
+## DEBUGGING PROCESS
+1. Identify the EXACT error or unexpected behavior
+2. Find the ROOT CAUSE (not just the symptom)
+3. Provide a COMPLETE fix that addresses the root cause
+4. Explain how to prevent this in the future
+
+## COMMON ISSUES TO CHECK
+- Missing 'use client' directive
+- Incorrect imports or missing dependencies
+- TypeScript type mismatches
+- React hooks rules violations
+- Async/await issues
+- Hydration mismatches
+
+## OUTPUT FORMAT
+### 🐛 Issue Identified
+[What's wrong - 1 line]
+
+### 🔍 Root Cause  
+[Why this happens - 1-2 lines]
+
+### FILE: [path to fixed file]
+\`\`\`tsx
+// complete fixed code
+\`\`\`
+
+### 🛡️ Prevention
+[How to avoid this - 1 line]${contextNote}`;
 
     case 'improve':
-      return `You are an expert code improvement specialist for React, Next.js, and TypeScript.
+      return `# IDENTITY & PURPOSE
+You are an elite code optimizer who improves code while maintaining 100% backward compatibility.
 
-## YOUR ROLE:
-Take existing code and make it better while maintaining original functionality.
+## IMPROVEMENT AREAS
+1. **Performance**: memo, useMemo, useCallback where beneficial
+2. **Type Safety**: Eliminate any, add proper interfaces
+3. **Accessibility**: ARIA, keyboard navigation, semantic HTML
+4. **Error Handling**: Loading states, error boundaries
+5. **Code Quality**: DRY, single responsibility, clear naming
 
-## IMPROVEMENT AREAS:
-1. Performance: memoization, optimize re-renders
-2. Code Quality: better types, cleaner logic
-3. Accessibility: ARIA, keyboard nav
-4. Best Practices: modern React patterns
+## RULES
+1. ✅ PRESERVE all existing functionality exactly
+2. ✅ Provide COMPLETE improved file (not snippets)
+3. ❌ NEVER remove features or change behavior unless asked
 
-## MULTI-FILE FORMAT:
-### FILE: app/components/ComponentName.tsx
+## OUTPUT FORMAT
+### 📈 Improvements Made
+[Brief list of what was improved]
+
+### FILE: [path]
 \`\`\`tsx
-// improved code here
-\`\`\`
-
-## RESPONSE FORMAT:
-1. Brief summary of improvements (1 line)
-2. Complete improved code using ### FILE: format`;
+// complete improved code
+\`\`\`${contextNote}`;
 
     case 'analyze':
       return `You are an expert code analyzer for React, Next.js, and TypeScript.
-Provide concise, actionable analysis. Be brief and direct.`;
+Provide concise, actionable analysis. Be brief and direct.
+      
+Rate each area 1-10:
+- Type Safety
+- Performance  
+- Accessibility
+- Code Quality
+- Error Handling
+
+Provide specific recommendations with code examples.${contextNote}`;
 
     default:
       return basePrompt;
@@ -300,33 +491,238 @@ export async function POST(
       content: userMessage,
     }).then(() => {}).catch(console.error);
 
-    // Detect intent
+    // Detect intent and target file
     const intent = detectIntent(userMessage);
-    const systemPrompt = getSystemPrompt(intent.type);
-
-    // Build conversation messages for AI
-    const conversationMessages: Array<{ role: 'user' | 'assistant'; content: string }> = history
-      .reverse()
-      .map(msg => ({
-        role: msg.role as 'user' | 'assistant',
-        content: msg.content,
-      }));
-    
-    // Add current message
-    conversationMessages.push({ role: 'user', content: userMessage });
 
     // Create streaming response
     const encoder = new TextEncoder();
     let fullResponse = '';
     const createdFiles: string[] = [];
 
+    // Helper function to send step updates
+    const sendStep = (controller: ReadableStreamDefaultController, step: {
+      type: 'step';
+      step: string;
+      status: 'start' | 'complete' | 'error';
+      message: string;
+      details?: string;
+      icon?: string;
+    }) => {
+      controller.enqueue(
+        encoder.encode(`data: ${JSON.stringify(step)}\n\n`)
+      );
+    };
+
     const stream = new ReadableStream({
       async start(controller) {
         try {
-          // Send initial status
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify({ type: 'status', message: 'Thinking...' })}\n\n`)
-          );
+          // Step 1: Understanding the request
+          sendStep(controller, {
+            type: 'step',
+            step: 'understanding',
+            status: 'start',
+            message: 'Analyzing your request...',
+            icon: '🧠'
+          });
+          
+          await new Promise(resolve => setTimeout(resolve, 400)); // Small delay for UX
+          
+          // Determine the agent type description and icon
+          const agentInfo: Record<string, { desc: string; icon: string }> = {
+            'generate': { desc: 'Creating new components', icon: '✨' },
+            'modify': { desc: 'Modifying existing code', icon: '📝' },
+            'debug': { desc: 'Finding and fixing bugs', icon: '🐛' },
+            'improve': { desc: 'Optimizing code quality', icon: '⚡' },
+            'analyze': { desc: 'Analyzing code patterns', icon: '🔍' },
+            'architect': { desc: 'Planning system design', icon: '🏗️' },
+            'test': { desc: 'Generating test cases', icon: '🧪' },
+            'security': { desc: 'Security vulnerability scan', icon: '🔒' },
+            'docs': { desc: 'Generating documentation', icon: '📚' },
+            'deploy': { desc: 'Setting up deployment', icon: '🚀' },
+            'review': { desc: 'Reviewing code quality', icon: '👀' },
+          };
+          
+          const agentData = agentInfo[intent.type] || { desc: 'Processing request', icon: '⚙️' };
+          
+          sendStep(controller, {
+            type: 'step',
+            step: 'understanding',
+            status: 'complete',
+            message: `Request understood: ${agentData.desc}`,
+            details: intent.targetFile ? `Target: ${intent.targetFile}` : undefined,
+            icon: agentData.icon
+          });
+
+          // Step 2: Gathering context (if applicable)
+          let contextPrompt = '';
+          let hasContext = false;
+          let contextFiles: string[] = [];
+          
+          if (project.gitRepoPath) {
+            sendStep(controller, {
+              type: 'step',
+              step: 'context',
+              status: 'start',
+              message: 'Scanning project files...',
+              icon: '📂'
+            });
+
+            try {
+              if (intent.type === 'modify' || intent.type === 'debug' || intent.type === 'improve' || 
+                  intent.type === 'test' || intent.type === 'security' || intent.type === 'review') {
+                // For modifications, get specific file context with related files
+                if (intent.targetFile) {
+                  sendStep(controller, {
+                    type: 'step',
+                    step: 'reading_file',
+                    status: 'start',
+                    message: `Reading ${intent.targetFile}...`,
+                    icon: '📄'
+                  });
+                  
+                  const fileContext = await getFileContext(project.gitRepoPath, intent.targetFile);
+                  
+                  if (fileContext.targetFile) {
+                    contextPrompt = formatFileContextForModification(
+                      fileContext.targetFile,
+                      fileContext.relatedFiles,
+                      fileContext.projectStructure
+                    );
+                    hasContext = true;
+                    contextFiles = [fileContext.targetFile.path, ...fileContext.relatedFiles.map(f => f.path)];
+                    
+                    sendStep(controller, {
+                      type: 'step',
+                      step: 'reading_file',
+                      status: 'complete',
+                      message: `Loaded ${intent.targetFile}`,
+                      details: fileContext.relatedFiles.length > 0 
+                        ? `+ ${fileContext.relatedFiles.length} related files` 
+                        : undefined,
+                      icon: '📄'
+                    });
+                  }
+                } else {
+                  // No specific file, get broader project context
+                  sendStep(controller, {
+                    type: 'step',
+                    step: 'analyzing',
+                    status: 'start',
+                    message: 'Analyzing project structure...',
+                    icon: '🔍'
+                  });
+                  
+                  const projectContext = await getProjectContext(project.gitRepoPath, {
+                    maxContext: 40000,
+                  });
+                  contextPrompt = formatContextForPrompt(projectContext);
+                  hasContext = true;
+                  contextFiles = projectContext.files.map(f => f.path);
+                  
+                  sendStep(controller, {
+                    type: 'step',
+                    step: 'analyzing',
+                    status: 'complete',
+                    message: `Analyzed ${contextFiles.length} files`,
+                    icon: '🔍'
+                  });
+                }
+              } else if (intent.type === 'generate' || intent.type === 'architect') {
+                // For generation, provide project structure and existing patterns
+                sendStep(controller, {
+                  type: 'step',
+                  step: 'analyzing',
+                  status: 'start',
+                  message: 'Loading existing patterns...',
+                  icon: '🔍'
+                });
+                
+                const projectContext = await getProjectContext(project.gitRepoPath, {
+                  maxContext: 30000,
+                });
+                contextPrompt = formatContextForPrompt(projectContext);
+                hasContext = true;
+                contextFiles = projectContext.files.map(f => f.path);
+                
+                sendStep(controller, {
+                  type: 'step',
+                  step: 'analyzing',
+                  status: 'complete',
+                  message: 'Project patterns loaded',
+                  details: `${contextFiles.length} files analyzed`,
+                  icon: '🔍'
+                });
+              }
+              
+              if (hasContext) {
+                sendStep(controller, {
+                  type: 'step',
+                  step: 'context',
+                  status: 'complete',
+                  message: `Context ready (${contextFiles.length} files)`,
+                  details: contextFiles.slice(0, 3).join(', ') + (contextFiles.length > 3 ? ` +${contextFiles.length - 3} more` : ''),
+                  icon: '✅'
+                });
+              } else {
+                sendStep(controller, {
+                  type: 'step',
+                  step: 'context',
+                  status: 'complete',
+                  message: 'Starting fresh (no existing files)',
+                  icon: '📭'
+                });
+              }
+            } catch (error) {
+              console.error('Error gathering context:', error);
+              sendStep(controller, {
+                type: 'step',
+                step: 'context',
+                status: 'error',
+                message: 'Could not load project context',
+                icon: '⚠️'
+              });
+            }
+          }
+
+          // Step 3: Generating code / Thinking
+          const systemPrompt = getSystemPrompt(intent.type, hasContext);
+          
+          sendStep(controller, {
+            type: 'step',
+            step: 'thinking',
+            status: 'start',
+            message: 'AI is reasoning...',
+            details: 'Formulating the best approach',
+            icon: '🤔'
+          });
+
+          // Build conversation messages for AI
+          const conversationMessages: Array<{ role: 'user' | 'assistant'; content: string }> = history
+            .reverse()
+            .map(msg => ({
+              role: msg.role as 'user' | 'assistant',
+              content: msg.content,
+            }));
+          
+          // Add current message with context
+          const enhancedMessage = contextPrompt 
+            ? `${contextPrompt}\n\n---\n\n## 💬 USER REQUEST\n${userMessage}`
+            : userMessage;
+          
+          conversationMessages.push({ role: 'user', content: enhancedMessage });
+
+          // Short delay to show thinking step
+          await new Promise(resolve => setTimeout(resolve, 300));
+
+          // Step 4: Streaming response
+          sendStep(controller, {
+            type: 'step',
+            step: 'generating',
+            status: 'start',
+            message: 'Generating code...',
+            details: 'Writing optimized, production-ready code',
+            icon: '✨'
+          });
 
           // Stream from Claude using Vercel AI SDK
           const result = streamText({
@@ -336,41 +732,111 @@ export async function POST(
           });
 
           // Stream text chunks as they arrive
+          let isFirstChunk = true;
           for await (const chunk of (await result).textStream) {
+            if (isFirstChunk) {
+              sendStep(controller, {
+                type: 'step',
+                step: 'thinking',
+                status: 'complete',
+                message: 'Analysis complete',
+                icon: '🧠'
+              });
+              isFirstChunk = false;
+            }
+            
             fullResponse += chunk;
             controller.enqueue(
               encoder.encode(`data: ${JSON.stringify({ type: 'text', content: chunk })}\n\n`)
             );
           }
 
-          // Process files after streaming is complete
-          if (['generate', 'improve', 'debug'].includes(intent.type) && project.gitRepoPath) {
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify({ type: 'status', message: 'Creating files...' })}\n\n`)
-            );
+          sendStep(controller, {
+            type: 'step',
+            step: 'generating',
+            status: 'complete',
+            message: 'Code generation complete',
+            details: `Generated ${fullResponse.length} characters`,
+            icon: '✨'
+          });
+
+          // Step 5: Process and write files
+          if (['generate', 'modify', 'improve', 'debug', 'test', 'docs'].includes(intent.type) && project.gitRepoPath) {
+            sendStep(controller, {
+              type: 'step',
+              step: 'parsing',
+              status: 'start',
+              message: 'Extracting code blocks...',
+              icon: '🔍'
+            });
 
             const parsedFiles = parseMultipleFiles(fullResponse);
             
             if (parsedFiles.length > 0) {
+              sendStep(controller, {
+                type: 'step',
+                step: 'parsing',
+                status: 'complete',
+                message: `Found ${parsedFiles.length} file(s) to write`,
+                details: parsedFiles.map(f => f.name).join(', '),
+                icon: '📦'
+              });
+
+              sendStep(controller, {
+                type: 'step',
+                step: 'writing',
+                status: 'start',
+                message: 'Saving files to project...',
+                icon: '💾'
+              });
+
               const projectPath = project.gitRepoPath;
+              let successCount = 0;
               
               for (const file of parsedFiles) {
                 try {
                   const fullPath = path.join(projectPath, file.filePath);
                   const dir = path.dirname(fullPath);
+                  
+                  // Check if file exists (update vs create)
+                  let isUpdate = false;
+                  try {
+                    await fs.access(fullPath);
+                    isUpdate = true;
+                  } catch {}
+                  
                   await fs.mkdir(dir, { recursive: true });
                   await fs.writeFile(fullPath, file.code, 'utf-8');
                   
                   createdFiles.push(file.filePath);
+                  successCount++;
                   
                   controller.enqueue(
                     encoder.encode(`data: ${JSON.stringify({
                       type: 'file_created',
                       file: { path: file.filePath, name: file.name },
+                      action: isUpdate ? 'updated' : 'created',
                     })}\n\n`)
                   );
+
+                  sendStep(controller, {
+                    type: 'step',
+                    step: 'file_write',
+                    status: 'complete',
+                    message: isUpdate ? `Updated: ${file.filePath}` : `Created: ${file.filePath}`,
+                    icon: isUpdate ? '📝' : '📄'
+                  });
+
                 } catch (err) {
                   console.error(`Error writing ${file.filePath}:`, err);
+                  sendStep(controller, {
+                    type: 'step',
+                    step: 'file_write',
+                    status: 'error',
+                    message: `Failed: ${file.filePath}`,
+                    details: err instanceof Error ? err.message : 'Unknown error',
+                    icon: '❌'
+                  });
                 }
               }
 
@@ -388,16 +854,55 @@ export async function POST(
                   const mainPagePath = path.join(projectPath, 'app', 'page.tsx');
                   await fs.writeFile(mainPagePath, `'use client';\n\nimport ${componentName} from './components/${componentName}';\n\nexport default function Home() {\n  return <${componentName} />;\n}\n`, 'utf-8');
                   createdFiles.push('app/page.tsx');
+                  successCount++;
+                  
                   controller.enqueue(
                     encoder.encode(`data: ${JSON.stringify({
                       type: 'file_created',
                       file: { path: 'app/page.tsx', name: 'page.tsx' },
+                      action: 'updated',
                     })}\n\n`)
                   );
+
+                  sendStep(controller, {
+                    type: 'step',
+                    step: 'file_write',
+                    status: 'complete',
+                    message: 'Auto-linked component to page.tsx',
+                    icon: '🔗'
+                  });
                 } catch {}
               }
+
+              sendStep(controller, {
+                type: 'step',
+                step: 'writing',
+                status: 'complete',
+                message: `Saved ${successCount} file(s) successfully`,
+                icon: '💾'
+              });
+
+            } else {
+              sendStep(controller, {
+                type: 'step',
+                step: 'parsing',
+                status: 'complete',
+                message: 'No code files to save (text response)',
+                icon: '💬'
+              });
             }
           }
+
+          // Final step: Complete
+          sendStep(controller, {
+            type: 'step',
+            step: 'complete',
+            status: 'complete',
+            message: createdFiles.length > 0 
+              ? `Done! Created/updated ${createdFiles.length} file(s)` 
+              : 'Response complete',
+            icon: '🎉'
+          });
 
           // Save assistant message (non-blocking)
           db.insert(messages).values({

@@ -17,5 +17,6 @@ export const config = {
     '/api/projects/:path*',
     '/api/sandbox/:path*',
     '/api/containers/:path*',
+    '/api/github/:path*',
   ],
 };

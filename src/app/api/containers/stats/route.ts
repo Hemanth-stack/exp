@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-config';
 import { previewManager } from '@/lib/preview-manager';
-import { CONTAINER_LIMITS } from '@/lib/redis';
 
 /**
  * GET /api/containers/stats

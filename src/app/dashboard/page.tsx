@@ -10,8 +10,9 @@ import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/components/ui/use-toast';
-import { Plus, BrainCircuit, LogOut, Settings, Trash2, Search, Loader2, ExternalLink, Code, Zap, Github, Check } from 'lucide-react';
+import { Plus, BrainCircuit, LogOut, Settings, Trash2, Search, Loader2, ExternalLink, Code, Zap, Github, Check, AlertCircle } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 
 interface Project {
@@ -24,7 +25,7 @@ interface Project {
   updatedAt: string;
 }
 
-function Sidebar({ user }: { user: any }) {
+function Sidebar({ user }: { user: { name?: string | null; email?: string | null; githubUsername?: string | null } }) {
   const isGitHubConnected = !!user?.githubUsername;
   
   const handleConnectGitHub = async () => {
@@ -141,6 +142,18 @@ function ProjectCard({ project, onDelete }: { project: Project, onDelete: (id: s
   );
 }
 
+interface GitHubRepoInfo {
+  name: string;
+  fullName: string;
+  description?: string;
+  owner: string;
+  isPrivate: boolean;
+  defaultBranch: string;
+  language?: string;
+  stargazersCount: number;
+  htmlUrl: string;
+}
+
 export default function DashboardPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
@@ -154,6 +167,14 @@ export default function DashboardPage() {
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectDescription, setNewProjectDescription] = useState('');
   const [newProjectTemplate, setNewProjectTemplate] = useState('nextjs');
+  
+  // GitHub import state
+  const [createMode, setCreateMode] = useState<'template' | 'github'>('template');
+  const [githubUrl, setGithubUrl] = useState('');
+  const [isValidatingUrl, setIsValidatingUrl] = useState(false);
+  const [githubRepoInfo, setGithubRepoInfo] = useState<GitHubRepoInfo | null>(null);
+  const [githubError, setGithubError] = useState<string | null>(null);
+  const [autoStartPreview, setAutoStartPreview] = useState(true);
 
   useEffect(() => {
     if (status === 'unauthenticated') {
@@ -163,6 +184,55 @@ export default function DashboardPage() {
       fetchProjects();
     }
   }, [status, router]);
+
+  // Debounced GitHub URL validation
+  useEffect(() => {
+    if (createMode !== 'github' || !githubUrl.trim()) {
+      setGithubRepoInfo(null);
+      setGithubError(null);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      validateGitHubUrl(githubUrl);
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [githubUrl, createMode]);
+
+  const validateGitHubUrl = async (url: string) => {
+    setIsValidatingUrl(true);
+    setGithubError(null);
+    setGithubRepoInfo(null);
+
+    try {
+      const response = await fetch('/api/github/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+
+      const data = await response.json();
+
+      if (data.valid) {
+        setGithubRepoInfo(data.repo);
+        // Auto-fill project name if empty
+        if (!newProjectName && data.repo?.name) {
+          setNewProjectName(data.repo.name);
+        }
+        // Auto-fill description if empty
+        if (!newProjectDescription && data.repo?.description) {
+          setNewProjectDescription(data.repo.description);
+        }
+      } else {
+        setGithubError(data.error || 'Invalid repository');
+      }
+    } catch {
+      setGithubError('Failed to validate URL');
+    } finally {
+      setIsValidatingUrl(false);
+    }
+  };
 
   const fetchProjects = async () => {
     setIsLoading(true);
@@ -195,42 +265,89 @@ export default function DashboardPage() {
       return;
     }
 
+    // Validate GitHub URL if in GitHub mode
+    if (createMode === 'github') {
+      if (!githubUrl.trim()) {
+        toast({
+          title: 'GitHub URL is required',
+          variant: 'destructive',
+        });
+        return;
+      }
+      if (githubError || !githubRepoInfo) {
+        toast({
+          title: 'Invalid GitHub repository',
+          description: githubError || 'Please enter a valid GitHub URL',
+          variant: 'destructive',
+        });
+        return;
+      }
+    }
+
     setIsCreating(true);
     try {
+      const requestBody = createMode === 'github'
+        ? {
+            source: 'github',
+            name: newProjectName,
+            description: newProjectDescription,
+            githubUrl: githubUrl.trim(),
+            autoStartPreview,
+          }
+        : {
+            source: 'template',
+            name: newProjectName,
+            description: newProjectDescription,
+            template: newProjectTemplate,
+          };
+
       const response = await fetch('/api/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: newProjectName,
-          description: newProjectDescription,
-          template: newProjectTemplate,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (response.ok) {
         const newProject = await response.json();
         setProjects([newProject, ...projects]);
+        
+        const message = createMode === 'github'
+          ? `${newProject.name} has been imported from GitHub.`
+          : `${newProject.name} has been successfully created.`;
+        
         toast({
-          title: 'Project Created',
-          description: `${newProject.name} has been successfully created.`,
+          title: createMode === 'github' ? 'Repository Imported' : 'Project Created',
+          description: message,
         });
-        setIsCreateModalOpen(false);
-        setNewProjectName('');
-        setNewProjectDescription('');
-        setNewProjectTemplate('nextjs');
+        
+        // Reset form
+        resetCreateForm();
       } else {
         const errorData = await response.json();
         throw new Error(errorData.error || 'Failed to create project');
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'An error occurred';
       toast({
         title: 'Error Creating Project',
-        description: error.message,
+        description: message,
         variant: 'destructive',
       });
     } finally {
       setIsCreating(false);
     }
+  };
+
+  const resetCreateForm = () => {
+    setIsCreateModalOpen(false);
+    setNewProjectName('');
+    setNewProjectDescription('');
+    setNewProjectTemplate('nextjs');
+    setCreateMode('template');
+    setGithubUrl('');
+    setGithubRepoInfo(null);
+    setGithubError(null);
+    setAutoStartPreview(true);
   };
 
   const deleteProject = async (id: string) => {
@@ -247,7 +364,7 @@ export default function DashboardPage() {
       } else {
         throw new Error('Failed to delete project');
       }
-    } catch (error) {
+    } catch {
       toast({
         title: 'Error Deleting Project',
         description: 'An error occurred while deleting the project.',
@@ -327,53 +444,157 @@ export default function DashboardPage() {
         </div>
       </main>
 
-      <Dialog open={isCreateModalOpen} onOpenChange={setIsCreateModalOpen}>
-        <DialogContent>
+      <Dialog open={isCreateModalOpen} onOpenChange={(open) => {
+        if (!open) resetCreateForm();
+        else setIsCreateModalOpen(true);
+      }}>
+        <DialogContent className="sm:max-w-[500px]">
           <DialogHeader>
             <DialogTitle>Create a New Project</DialogTitle>
             <DialogDescription>
-              Fill in the details below to create a new AI-powered application.
+              Start from a template or import an existing GitHub repository.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="name">Project Name</Label>
-              <Input
-                id="name"
-                placeholder="e.g., My Awesome App"
-                value={newProjectName}
-                onChange={(e) => setNewProjectName(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="description">Description</Label>
-              <Input
-                id="description"
-                placeholder="A brief description of your project"
-                value={newProjectDescription}
-                onChange={(e) => setNewProjectDescription(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="template">Template</Label>
-              <Select value={newProjectTemplate} onValueChange={setNewProjectTemplate}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select a template" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="nextjs">Next.js</SelectItem>
-                  <SelectItem value="vite-react">Vite + React</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setIsCreateModalOpen(false)} disabled={isCreating}>
+          
+          <Tabs value={createMode} onValueChange={(v: string) => setCreateMode(v as 'template' | 'github')} className="w-full">
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="template" className="flex items-center gap-2">
+                <Code className="h-4 w-4" />
+                Template
+              </TabsTrigger>
+              <TabsTrigger value="github" className="flex items-center gap-2">
+                <Github className="h-4 w-4" />
+                Import from GitHub
+              </TabsTrigger>
+            </TabsList>
+            
+            <TabsContent value="template" className="space-y-4 pt-4">
+              <div className="space-y-2">
+                <Label htmlFor="name">Project Name</Label>
+                <Input
+                  id="name"
+                  placeholder="e.g., My Awesome App"
+                  value={newProjectName}
+                  onChange={(e) => setNewProjectName(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="description">Description</Label>
+                <Input
+                  id="description"
+                  placeholder="A brief description of your project"
+                  value={newProjectDescription}
+                  onChange={(e) => setNewProjectDescription(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="template">Template</Label>
+                <Select value={newProjectTemplate} onValueChange={setNewProjectTemplate}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select a template" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="nextjs">Next.js</SelectItem>
+                    <SelectItem value="vite-react">Vite + React</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </TabsContent>
+            
+            <TabsContent value="github" className="space-y-4 pt-4">
+              <div className="space-y-2">
+                <Label htmlFor="github-url">GitHub Repository URL</Label>
+                <div className="relative">
+                  <Input
+                    id="github-url"
+                    placeholder="https://github.com/owner/repo"
+                    value={githubUrl}
+                    onChange={(e) => setGithubUrl(e.target.value)}
+                    className={githubError ? 'border-red-500 pr-10' : githubRepoInfo ? 'border-green-500 pr-10' : ''}
+                  />
+                  {isValidatingUrl && (
+                    <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+                  )}
+                  {!isValidatingUrl && githubRepoInfo && (
+                    <Check className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-green-500" />
+                  )}
+                  {!isValidatingUrl && githubError && (
+                    <AlertCircle className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-red-500" />
+                  )}
+                </div>
+                {githubError && (
+                  <p className="text-sm text-red-500 flex items-center gap-1">
+                    <AlertCircle className="h-3 w-3" />
+                    {githubError}
+                  </p>
+                )}
+                {githubRepoInfo && (
+                  <div className="rounded-md bg-muted p-3 text-sm space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium">{githubRepoInfo.fullName}</span>
+                      {githubRepoInfo.isPrivate && (
+                        <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded">Private</span>
+                      )}
+                    </div>
+                    {githubRepoInfo.description && (
+                      <p className="text-muted-foreground text-xs">{githubRepoInfo.description}</p>
+                    )}
+                    <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                      {githubRepoInfo.language && <span>{githubRepoInfo.language}</span>}
+                      <span>⭐ {githubRepoInfo.stargazersCount}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+              
+              <div className="space-y-2">
+                <Label htmlFor="import-name">Project Name</Label>
+                <Input
+                  id="import-name"
+                  placeholder="e.g., My Imported App"
+                  value={newProjectName}
+                  onChange={(e) => setNewProjectName(e.target.value)}
+                />
+              </div>
+              
+              <div className="space-y-2">
+                <Label htmlFor="import-description">Description (optional)</Label>
+                <Input
+                  id="import-description"
+                  placeholder="A brief description of your project"
+                  value={newProjectDescription}
+                  onChange={(e) => setNewProjectDescription(e.target.value)}
+                />
+              </div>
+              
+              <div className="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  id="auto-preview"
+                  checked={autoStartPreview}
+                  onChange={(e) => setAutoStartPreview(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                <Label htmlFor="auto-preview" className="text-sm font-normal cursor-pointer">
+                  Start preview automatically after import
+                </Label>
+              </div>
+            </TabsContent>
+          </Tabs>
+          
+          <DialogFooter className="mt-4">
+            <Button variant="ghost" onClick={resetCreateForm} disabled={isCreating}>
               Cancel
             </Button>
-            <Button onClick={createProject} disabled={isCreating}>
+            <Button 
+              onClick={createProject} 
+              disabled={isCreating || (createMode === 'github' && (!githubRepoInfo || !!githubError))}
+            >
               {isCreating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-              {isCreating ? 'Creating...' : 'Create Project'}
+              {isCreating 
+                ? (createMode === 'github' ? 'Importing...' : 'Creating...') 
+                : (createMode === 'github' ? 'Import Repository' : 'Create Project')
+              }
             </Button>
           </DialogFooter>
         </DialogContent>

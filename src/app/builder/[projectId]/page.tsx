@@ -34,6 +34,32 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   createdAt: Date;
+  filesCreated?: string[];  // Track files created by this message
+  isCodeResponse?: boolean; // Flag for responses that generated code
+}
+
+// Helper function to extract chat-friendly message (without full code blocks)
+function formatChatMessage(content: string, filesCreated?: string[]): string {
+  // Check if this is a code generation response
+  const hasCodeBlock = /```[\s\S]*?```/.test(content);
+  
+  if (!hasCodeBlock) {
+    return content;
+  }
+  
+  // Extract just the description before the code block
+  const beforeCode = content.split(/```/)[0].trim();
+  
+  // Build a clean message
+  let cleanMessage = beforeCode || "I've generated the code for you.";
+  
+  // Add file info if available
+  if (filesCreated && filesCreated.length > 0) {
+    cleanMessage += `\n\n📁 **Files created/updated:**\n${filesCreated.map(f => `- \`${f}\``).join('\n')}`;
+    cleanMessage += `\n\n✅ The code has been saved to your project. Switch to **Code Editor** view to see the changes.`;
+  }
+  
+  return cleanMessage;
 }
 
 interface FileNode {
@@ -162,12 +188,24 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
           if (msgResponse.ok) {
             const msgData = await msgResponse.json();
             if (msgData.messages && msgData.messages.length > 0) {
-              const loadedMessages: Message[] = msgData.messages.map((msg: { id: string; role: string; content: string; createdAt: string }) => ({
-                id: msg.id,
-                role: msg.role as 'user' | 'assistant',
-                content: msg.content,
-                createdAt: new Date(msg.createdAt),
-              }));
+              const loadedMessages: Message[] = msgData.messages.map((msg: { id: string; role: string; content: string; createdAt: string; toolCalls?: Array<{ files?: string[] }> }) => {
+                // For assistant messages, format to remove code blocks
+                let content = msg.content;
+                const filesFromToolCalls = msg.toolCalls?.[0]?.files || [];
+                
+                if (msg.role === 'assistant') {
+                  content = formatChatMessage(msg.content, filesFromToolCalls);
+                }
+                
+                return {
+                  id: msg.id,
+                  role: msg.role as 'user' | 'assistant',
+                  content,
+                  createdAt: new Date(msg.createdAt),
+                  filesCreated: filesFromToolCalls,
+                  isCodeResponse: filesFromToolCalls.length > 0,
+                };
+              });
               setMessages(loadedMessages);
             }
           }
@@ -479,50 +517,75 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
 
       const decoder = new TextDecoder();
       let assistantContent = '';
+      const createdFiles: string[] = [];
+      let buffer = '';  // Buffer for incomplete SSE messages
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
+        // Add new chunk to buffer
+        buffer += decoder.decode(value, { stream: true });
+        
+        // Process complete lines
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';  // Keep incomplete line in buffer
 
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.slice(6));
               
-              if (data.type === 'text' && data.content) {
+              if (data.type === 'status') {
+                // Show status updates
+                setCurrentMessage(data.message || 'Processing...');
+              } else if (data.type === 'text' && data.content) {
+                // Append streamed text
                 assistantContent += data.content;
-                setCurrentMessage(assistantContent);
+                // Show cleaned version while streaming
+                const cleanedMessage = formatChatMessage(assistantContent);
+                setCurrentMessage(cleanedMessage);
               } else if (data.type === 'file_created') {
+                if (data.file?.path) {
+                  createdFiles.push(data.file.path);
+                }
                 toast({
-                  title: 'File created',
-                  description: `Created ${data.file?.path || 'file'}`,
+                  title: '✅ File created',
+                  description: data.file?.path || 'file',
+                });
+              } else if (data.type === 'error') {
+                toast({
+                  title: 'Error',
+                  description: data.error || 'Something went wrong',
+                  variant: 'destructive',
                 });
               } else if (data.type === 'done') {
                 if (data.conversationId) {
                   setConversationId(data.conversationId);
                 }
                 
+                // Format the final message
+                const formattedContent = formatChatMessage(assistantContent, createdFiles);
+                
                 const assistantMessage: Message = {
                   id: Date.now().toString(),
                   role: 'assistant',
-                  content: assistantContent,
+                  content: formattedContent,
                   createdAt: new Date(),
+                  filesCreated: createdFiles,
+                  isCodeResponse: createdFiles.length > 0,
                 };
                 setMessages(prev => [...prev, assistantMessage]);
                 setCurrentMessage('');
                 
                 if (data.filesCreated > 0) {
                   fetchFiles();
-                  // Close and refresh any open tabs for modified files
                   setOpenTabs([]);
                   setActiveTab(null);
                 }
               }
             } catch {
-              // Ignore parse errors
+              // Ignore parse errors for incomplete JSON
             }
           }
         }
@@ -580,7 +643,32 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
   };
 
   const handleAskAIToModify = (filePath: string) => {
-    setInputValue(`Please modify the file ${filePath}:\n\n`);
+    // Get current file content if available
+    const currentTab = openTabs.find(t => t.path === filePath);
+    if (currentTab) {
+      // Include file content for context
+      const codePreview = currentTab.content.length > 500 
+        ? currentTab.content.substring(0, 500) + '\n// ... (file continues)'
+        : currentTab.content;
+      
+      setInputValue(`Please modify the file ${filePath}. Here's the current code:\n\n\`\`\`\n${codePreview}\n\`\`\`\n\nI want to: `);
+    } else {
+      setInputValue(`Please modify the file ${filePath}. I want to: `);
+    }
+  };
+
+  // Function to include multiple files for context
+  const handleAskAIWithContext = () => {
+    const contextFiles = openTabs
+      .filter(tab => tab.content)
+      .map(tab => `### FILE: ${tab.path}\n\`\`\`\n${tab.content.substring(0, 300)}${tab.content.length > 300 ? '\n// ...' : ''}\n\`\`\``)
+      .join('\n\n');
+    
+    if (contextFiles) {
+      setInputValue(`Here are my current files:\n\n${contextFiles}\n\nPlease: `);
+    } else {
+      setInputValue('');
+    }
   };
 
   const currentTab = openTabs.find(t => t.path === activeTab);
@@ -672,25 +760,49 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                             {message.content}
                           </ReactMarkdown>
                         </div>
+                        {/* Show quick actions for code responses */}
+                        {message.role === 'assistant' && message.filesCreated && message.filesCreated.length > 0 && (
+                          <div className="mt-3 pt-2 border-t border-border/50">
+                            <div className="flex flex-wrap gap-2">
+                              {message.filesCreated.map((file) => (
+                                <button
+                                  key={file}
+                                  onClick={() => {
+                                    fetchFileContent(file);
+                                    setViewMode('code');
+                                  }}
+                                  className="text-xs px-2 py-1 bg-background/50 hover:bg-background rounded border flex items-center gap-1 transition-colors"
+                                >
+                                  <Code className="h-3 w-3" />
+                                  {file.split('/').pop()}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   ))
                 )}
                 
-                {currentMessage && (
+                {/* Streaming message display */}
+                {isStreaming && currentMessage && (
                   <div className="flex justify-start">
                     <div className="max-w-[80%] rounded-lg p-3 bg-muted">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
                         {currentMessage}
                       </ReactMarkdown>
+                      <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1" />
                     </div>
                   </div>
                 )}
                 
+                {/* Loading indicator when no message yet */}
                 {isStreaming && !currentMessage && (
                   <div className="flex justify-start">
-                    <div className="rounded-lg p-3 bg-muted">
+                    <div className="rounded-lg p-3 bg-muted flex items-center gap-2">
                       <Loader2 className="h-4 w-4 animate-spin" />
+                      <span className="text-sm text-muted-foreground">Thinking...</span>
                     </div>
                   </div>
                 )}
@@ -700,22 +812,56 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
             </ScrollArea>
 
             <div className="p-4 border-t">
-              <div className="flex gap-2">
-                <Input
-                  value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
-                  placeholder="Ask AI to build features..."
-                  disabled={isStreaming}
-                />
-                <Button
-                  onClick={handleSendMessage}
-                  disabled={isStreaming || !inputValue.trim()}
-                  size="icon"
-                >
-                  <Send className="h-4 w-4" />
-                </Button>
+              <div className="flex gap-2 items-end">
+                <div className="flex-1 relative">
+                  <textarea
+                    value={inputValue}
+                    onChange={(e) => setInputValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendMessage();
+                      }
+                    }}
+                    placeholder="Ask AI to build features... (Shift+Enter for new line)"
+                    disabled={isStreaming}
+                    className="w-full min-h-[44px] max-h-[200px] resize-none px-3 py-2 text-sm rounded-md border border-input bg-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                    style={{ height: 'auto' }}
+                    rows={1}
+                    onInput={(e) => {
+                      const target = e.target as HTMLTextAreaElement;
+                      target.style.height = 'auto';
+                      target.style.height = Math.min(target.scrollHeight, 200) + 'px';
+                    }}
+                  />
+                </div>
+                {isStreaming ? (
+                  <Button
+                    onClick={() => {
+                      abortControllerRef.current?.abort();
+                      setIsStreaming(false);
+                      setCurrentMessage('');
+                    }}
+                    variant="destructive"
+                    size="icon"
+                    className="shrink-0"
+                  >
+                    <Square className="h-4 w-4" />
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={handleSendMessage}
+                    disabled={!inputValue.trim()}
+                    size="icon"
+                    className="shrink-0"
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                )}
               </div>
+              <p className="text-xs text-muted-foreground mt-2">
+                {isStreaming ? '⏳ Generating... Click stop button to cancel' : '💡 Tip: Ask to create/edit multiple files at once'}
+              </p>
             </div>
           </div>
         </div>

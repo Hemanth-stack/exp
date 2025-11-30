@@ -4,7 +4,8 @@ import { authOptions } from '@/lib/auth-config';
 import { db } from '@/db';
 import { conversations, messages, projects } from '@/db/schema';
 import { eq, desc } from 'drizzle-orm';
-import { codeGeneratorAgent, debugAgent, analyzerAgent, improveAgent } from '@/mastra';
+import { anthropic } from '@ai-sdk/anthropic';
+import { streamText } from 'ai';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -117,6 +118,126 @@ function parseComponent(response: string): {
   };
 }
 
+// Parse multiple files from AI response (new multi-file format)
+function parseMultipleFiles(response: string): Array<{
+  filePath: string;
+  code: string;
+  name: string;
+}> {
+  const files: Array<{ filePath: string; code: string; name: string }> = [];
+  
+  // Match the ### FILE: pattern for multi-file responses
+  const filePattern = /###\s*FILE:\s*([^\n]+)\n```(?:typescript|tsx|jsx|ts|js|javascript|react|css|json)?\s*\n([\s\S]*?)```/gi;
+  
+  let match;
+  while ((match = filePattern.exec(response)) !== null) {
+    const filePath = match[1].trim();
+    const code = match[2].trim();
+    const name = filePath.split('/').pop() || filePath;
+    
+    files.push({ filePath, code, name });
+    console.log(`📁 Parsed file: ${filePath}`);
+  }
+  
+  // If no multi-file format found, try single file extraction
+  if (files.length === 0) {
+    const singleComponent = parseComponent(response);
+    if (singleComponent) {
+      files.push({
+        filePath: singleComponent.filePath,
+        code: singleComponent.code,
+        name: singleComponent.name,
+      });
+    }
+  }
+  
+  console.log(`✅ Total files parsed: ${files.length}`);
+  return files;
+}
+
+// Get system prompt based on intent
+function getSystemPrompt(intentType: string): string {
+  const basePrompt = `You are an expert React and Next.js code generator. Your role is to generate complete, functional React components and help edit existing code.
+
+## RULES:
+1. ALWAYS provide complete, working code that can be directly saved to a file
+2. Use TypeScript with proper typing
+3. Use Tailwind CSS for all styling (the project has Tailwind configured)
+4. For Next.js App Router, use 'use client' directive when component uses hooks or browser APIs
+5. Make components self-contained - include all necessary imports
+
+## MULTI-FILE SUPPORT:
+When creating or editing multiple files, use this format for EACH file:
+
+### FILE: app/components/ComponentName.tsx
+\`\`\`tsx
+// code here
+\`\`\`
+
+### FILE: app/page.tsx  
+\`\`\`tsx
+// code here
+\`\`\`
+
+## RESPONSE FORMAT:
+1. Start with a VERY brief description (1 sentence max)
+2. Immediately provide the complete code for each file using the ### FILE: format
+3. Keep explanations minimal - focus on code`;
+
+  switch (intentType) {
+    case 'debug':
+      return `You are an expert code debugger for React, Next.js, and TypeScript.
+
+## YOUR ROLE:
+1. Analyze code issues carefully
+2. Identify root causes, not just symptoms  
+3. Provide working fixes with clear explanations
+4. Fix single or multiple files as needed
+
+## MULTI-FILE FIX FORMAT:
+When fixing multiple files, use this format:
+
+### FILE: app/components/BrokenComponent.tsx
+\`\`\`tsx
+// fixed code here
+\`\`\`
+
+## RESPONSE FORMAT:
+1. Brief issue description (1 line)
+2. Fixed code using ### FILE: format
+3. Keep it concise`;
+
+    case 'improve':
+      return `You are an expert code improvement specialist for React, Next.js, and TypeScript.
+
+## YOUR ROLE:
+Take existing code and make it better while maintaining original functionality.
+
+## IMPROVEMENT AREAS:
+1. Performance: memoization, optimize re-renders
+2. Code Quality: better types, cleaner logic
+3. Accessibility: ARIA, keyboard nav
+4. Best Practices: modern React patterns
+
+## MULTI-FILE FORMAT:
+### FILE: app/components/ComponentName.tsx
+\`\`\`tsx
+// improved code here
+\`\`\`
+
+## RESPONSE FORMAT:
+1. Brief summary of improvements (1 line)
+2. Complete improved code using ### FILE: format`;
+
+    case 'analyze':
+      return `You are an expert code analyzer for React, Next.js, and TypeScript.
+Provide concise, actionable analysis. Be brief and direct.`;
+
+    default:
+      return basePrompt;
+  }
+}
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ projectId: string }> }
@@ -164,235 +285,145 @@ export async function POST(
       return NextResponse.json({ error: 'Conversation not found' }, { status: 404 });
     }
 
-    // Load conversation history
+    // Load conversation history (limit to last 6 for speed)
     const history = await db
       .select()
       .from(messages)
       .where(eq(messages.conversationId, conversation.id))
       .orderBy(desc(messages.createdAt))
-      .limit(10);
+      .limit(6);
 
-    // Save user message
-    await db.insert(messages).values({
+    // Save user message (non-blocking)
+    db.insert(messages).values({
       conversationId: conversation.id,
       role: 'user',
       content: userMessage,
-    });
+    }).then(() => {}).catch(console.error);
 
     // Detect intent
     const intent = detectIntent(userMessage);
+    const systemPrompt = getSystemPrompt(intent.type);
 
-    // Stream response
+    // Build conversation messages for AI
+    const conversationMessages: Array<{ role: 'user' | 'assistant'; content: string }> = history
+      .reverse()
+      .map(msg => ({
+        role: msg.role as 'user' | 'assistant',
+        content: msg.content,
+      }));
+    
+    // Add current message
+    conversationMessages.push({ role: 'user', content: userMessage });
+
+    // Create streaming response
     const encoder = new TextEncoder();
+    let fullResponse = '';
+    const createdFiles: string[] = [];
+
     const stream = new ReadableStream({
       async start(controller) {
         try {
-          // Send agent selection notification
+          // Send initial status
           controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: 'agent_selected',
-                agent: intent.type,
-                confidence: intent.confidence,
-              })}\n\n`
-            )
+            encoder.encode(`data: ${JSON.stringify({ type: 'status', message: 'Thinking...' })}\n\n`)
           );
 
-          // Select appropriate agent
-          let agent;
-          let agentName = '';
-          
-          switch (intent.type) {
-            case 'generate':
-              agent = codeGeneratorAgent;
-              agentName = '🎨 Code Generator';
-              break;
-            case 'debug':
-              agent = debugAgent;
-              agentName = '🐛 Debug Agent';
-              break;
-            case 'analyze':
-              agent = analyzerAgent;
-              agentName = '🔍 Analyzer';
-              break;
-            case 'improve':
-              agent = improveAgent;
-              agentName = '⚡ Improver';
-              break;
-            default:
-              agent = codeGeneratorAgent;
-              agentName = '🎨 Code Generator';
+          // Stream from Claude using Vercel AI SDK
+          const result = streamText({
+            model: anthropic('claude-sonnet-4-20250514'),
+            system: systemPrompt,
+            messages: conversationMessages,
+          });
+
+          // Stream text chunks as they arrive
+          for await (const chunk of (await result).textStream) {
+            fullResponse += chunk;
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({ type: 'text', content: chunk })}\n\n`)
+            );
           }
 
-          // Send agent execution start
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: 'agent_start',
-                agent: agentName,
-              })}\n\n`
-            )
-          );
+          // Process files after streaming is complete
+          if (['generate', 'improve', 'debug'].includes(intent.type) && project.gitRepoPath) {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({ type: 'status', message: 'Creating files...' })}\n\n`)
+            );
 
-          // Build conversation history as strings for the agent
-          const conversationContext = history
-            .reverse()
-            .map(msg => `${msg.role}: ${msg.content}`)
-            .join('\n\n');
-
-          // Create the prompt with context
-          const fullPrompt = conversationContext 
-            ? `Previous conversation:\n${conversationContext}\n\nUser: ${userMessage}`
-            : userMessage;
-
-          // Execute agent
-          const response = await agent.generate(fullPrompt);
-          
-          const assistantResponse = response.text || '';
-
-          // Send text response
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: 'text',
-                content: assistantResponse,
-              })}\n\n`
-            )
-          );
-
-          // Try to create files if it's a generation request
-          const createdFiles: string[] = [];
-          if (intent.type === 'generate' && project.gitRepoPath) {
-            console.log('📁 Attempting to create files for generation request...');
-            const component = parseComponent(assistantResponse);
+            const parsedFiles = parseMultipleFiles(fullResponse);
             
-            if (component) {
-              console.log('✅ Component parsed successfully:', component.name);
-              try {
-                // Use the project's actual git repo path
-                const projectPath = project.gitRepoPath;
-                const componentDir = path.join(projectPath, 'app', 'components');
-                
-                console.log('📂 Creating directory:', componentDir);
-                // Ensure directory exists
-                await fs.mkdir(componentDir, { recursive: true });
-                
-                // Write component file
-                const filePath = path.join(projectPath, component.filePath);
-                console.log('💾 Writing file:', filePath);
-                await fs.writeFile(filePath, component.code, 'utf-8');
-                console.log('✅ File written successfully!');
-                
-                createdFiles.push(component.filePath);
-
-                // Send file creation notification
-                controller.enqueue(
-                  encoder.encode(
-                    `data: ${JSON.stringify({
+            if (parsedFiles.length > 0) {
+              const projectPath = project.gitRepoPath;
+              
+              for (const file of parsedFiles) {
+                try {
+                  const fullPath = path.join(projectPath, file.filePath);
+                  const dir = path.dirname(fullPath);
+                  await fs.mkdir(dir, { recursive: true });
+                  await fs.writeFile(fullPath, file.code, 'utf-8');
+                  
+                  createdFiles.push(file.filePath);
+                  
+                  controller.enqueue(
+                    encoder.encode(`data: ${JSON.stringify({
                       type: 'file_created',
-                      file: {
-                        path: component.filePath,
-                        name: component.name,
-                        description: component.description,
-                      },
-                    })}\n\n`
-                  )
-                );
+                      file: { path: file.filePath, name: file.name },
+                    })}\n\n`)
+                  );
+                } catch (err) {
+                  console.error(`Error writing ${file.filePath}:`, err);
+                }
+              }
 
-                // Create a preview page if it doesn't exist
-                const previewPath = path.join(projectPath, 'app', 'preview', 'page.tsx');
-                const previewDir = path.join(projectPath, 'app', 'preview');
-                await fs.mkdir(previewDir, { recursive: true });
-                
-                const previewCode = `'use client';
-
-import ${component.name} from '../components/${component.name}';
-
-export default function PreviewPage() {
-  return (
-    <div className="min-h-screen bg-gray-50 p-8">
-      <div className="max-w-7xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900">Component Preview</h1>
-          <p className="text-gray-600 mt-2">${component.description}</p>
-        </div>
-        <div className="bg-white rounded-lg shadow-lg p-8">
-          <${component.name} />
-        </div>
-      </div>
-    </div>
-  );
-}
-`;
-                await fs.writeFile(previewPath, previewCode, 'utf-8');
-
-                // Also update the main page.tsx to render the component
-                const mainPagePath = path.join(projectPath, 'app', 'page.tsx');
-                const mainPageCode = `'use client';
-
-import ${component.name} from './components/${component.name}';
-
-export default function Home() {
-  return <${component.name} />;
-}
-`;
-                await fs.writeFile(mainPagePath, mainPageCode, 'utf-8');
-                console.log('✅ Main page updated to use:', component.name);
-
-                // Send preview link
-                controller.enqueue(
-                  encoder.encode(
-                    `data: ${JSON.stringify({
-                      type: 'preview_ready',
-                      url: `http://localhost:3000/builder/${projectId}?preview=true`,
-                      component: component.name,
-                    })}\n\n`
-                  )
-                );
-              } catch (fileError: unknown) {
-                console.error('File creation error:', fileError);
-                controller.enqueue(
-                  encoder.encode(
-                    `data: ${JSON.stringify({
-                      type: 'warning',
-                      message: 'Could not create files automatically. Please copy the code manually.',
-                    })}\n\n`
-                  )
-                );
+              // Auto-update main page for single component
+              const hasMainPage = parsedFiles.some(f => 
+                f.filePath === 'app/page.tsx' || f.filePath === 'page.tsx'
+              );
+              const componentFiles = parsedFiles.filter(f => 
+                f.filePath.includes('/components/') && f.filePath.endsWith('.tsx')
+              );
+              
+              if (!hasMainPage && componentFiles.length === 1) {
+                const componentName = componentFiles[0].name.replace('.tsx', '');
+                try {
+                  const mainPagePath = path.join(projectPath, 'app', 'page.tsx');
+                  await fs.writeFile(mainPagePath, `'use client';\n\nimport ${componentName} from './components/${componentName}';\n\nexport default function Home() {\n  return <${componentName} />;\n}\n`, 'utf-8');
+                  createdFiles.push('app/page.tsx');
+                  controller.enqueue(
+                    encoder.encode(`data: ${JSON.stringify({
+                      type: 'file_created',
+                      file: { path: 'app/page.tsx', name: 'page.tsx' },
+                    })}\n\n`)
+                  );
+                } catch {}
               }
             }
           }
 
-          // Save assistant message
-          await db.insert(messages).values({
+          // Save assistant message (non-blocking)
+          db.insert(messages).values({
             conversationId: conversation.id,
             role: 'assistant',
-            content: assistantResponse,
+            content: fullResponse,
             toolCalls: createdFiles.length > 0 ? [{ files: createdFiles }] : null,
-          });
+          }).then(() => {}).catch(console.error);
 
           // Send completion
           controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: 'done',
-                conversationId: conversation.id,
-                filesCreated: createdFiles.length,
-              })}\n\n`
-            )
+            encoder.encode(`data: ${JSON.stringify({
+              type: 'done',
+              conversationId: conversation.id,
+              filesCreated: createdFiles.length,
+            })}\n\n`)
           );
 
           controller.close();
         } catch (error: unknown) {
-          console.error('Chat error:', error);
-          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          console.error('Stream error:', error);
           controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: 'error',
-                error: errorMessage,
-              })}\n\n`
-            )
+            encoder.encode(`data: ${JSON.stringify({
+              type: 'error',
+              error: error instanceof Error ? error.message : 'Unknown error',
+            })}\n\n`)
           );
           controller.close();
         }
@@ -408,9 +439,8 @@ export default function Home() {
     });
   } catch (error: unknown) {
     console.error('Chat API error:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Internal server error';
     return NextResponse.json(
-      { error: errorMessage },
+      { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 }
     );
   }

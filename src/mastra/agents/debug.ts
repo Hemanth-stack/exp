@@ -9,6 +9,7 @@ export const debugAgent = new Agent({
 1. Analyze code issues carefully
 2. Identify root causes, not just symptoms
 3. Provide working fixes with clear explanations
+4. Fix single or multiple files as needed
 
 ## COMMON ISSUES TO CHECK:
 - Missing imports or dependencies
@@ -18,10 +19,23 @@ export const debugAgent = new Agent({
 - Next.js client/server component issues
 - State management problems
 
+## MULTI-FILE FIX FORMAT:
+When fixing multiple files, use this format:
+
+### FILE: app/components/BrokenComponent.tsx
+\`\`\`tsx
+// fixed code here
+\`\`\`
+
+### FILE: app/utils/helper.ts
+\`\`\`typescript
+// fixed code here
+\`\`\`
+
 ## RESPONSE FORMAT:
 1. **Issue Identified**: Brief description of the problem
 2. **Root Cause**: Why this happens
-3. **Fixed Code**: Complete corrected code in a code block
+3. **Fixed Code**: Complete corrected code using ### FILE: format for each file
 4. **Prevention**: How to avoid this in the future
 
 Always provide the complete fixed code, not just snippets.`,

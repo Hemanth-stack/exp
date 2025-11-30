@@ -93,10 +93,58 @@ export async function validateGitHubRepo(
   }
 }
 
+export type ProjectType = 'nextjs' | 'vite-react' | 'vue' | 'angular' | 'svelte' | 'express' | 'python' | 'java' | 'static' | 'unknown';
+
 /**
  * Detects project type from package.json or other config files
  */
-export async function detectProjectType(repoPath: string): Promise<'nextjs' | 'vite-react' | 'unknown'> {
+export async function detectProjectType(repoPath: string): Promise<ProjectType> {
+  // Check for Python project first
+  try {
+    const requirementsPath = path.join(repoPath, 'requirements.txt');
+    await fs.access(requirementsPath);
+    
+    // Check if there's also a package.json (hybrid project)
+    try {
+      const packageJsonPath = path.join(repoPath, 'package.json');
+      await fs.access(packageJsonPath);
+      // Has both - continue to check JS type
+    } catch {
+      // Only has requirements.txt - it's a Python project
+      return 'python';
+    }
+  } catch {
+    // No requirements.txt, continue
+  }
+
+  // Check for Java project
+  try {
+    await fs.access(path.join(repoPath, 'pom.xml'));
+    return 'java';
+  } catch {
+    // Not Maven
+  }
+  try {
+    await fs.access(path.join(repoPath, 'build.gradle'));
+    return 'java';
+  } catch {
+    // Not Gradle
+  }
+
+  // Check for static HTML
+  try {
+    await fs.access(path.join(repoPath, 'index.html'));
+    // Check if there's no package.json (pure static)
+    try {
+      await fs.access(path.join(repoPath, 'package.json'));
+      // Has package.json, continue to check JS type
+    } catch {
+      return 'static';
+    }
+  } catch {
+    // No index.html
+  }
+
   try {
     const packageJsonPath = path.join(repoPath, 'package.json');
     const content = await fs.readFile(packageJsonPath, 'utf-8');
@@ -108,6 +156,21 @@ export async function detectProjectType(repoPath: string): Promise<'nextjs' | 'v
     if (deps['next']) {
       return 'nextjs';
     }
+
+    // Check for Vue
+    if (deps['vue']) {
+      return 'vue';
+    }
+
+    // Check for Angular
+    if (deps['@angular/core']) {
+      return 'angular';
+    }
+
+    // Check for Svelte
+    if (deps['svelte']) {
+      return 'svelte';
+    }
     
     // Check for Vite + React
     if (deps['vite'] && (deps['react'] || deps['react-dom'])) {
@@ -117,6 +180,11 @@ export async function detectProjectType(repoPath: string): Promise<'nextjs' | 'v
     // Check for just React (assume Vite-React)
     if (deps['react'] || deps['react-dom']) {
       return 'vite-react';
+    }
+
+    // Check for Express
+    if (deps['express']) {
+      return 'express';
     }
     
     return 'unknown';
@@ -229,6 +297,106 @@ export class GitManager {
     const git = simpleGit(repoPath);
     await git.add('.');
     await git.commit(message);
+  }
+
+  /**
+   * Push changes to remote (GitHub)
+   */
+  async push(repoPath: string, accessToken?: string, repoUrl?: string): Promise<boolean> {
+    const git = simpleGit(repoPath);
+    
+    try {
+      // Check if remote exists
+      const remotes = await git.getRemotes(true);
+      const origin = remotes.find(r => r.name === 'origin');
+      
+      if (!origin) {
+        console.log('[GitManager] No remote configured, skipping push');
+        return false;
+      }
+
+      // Get the current remote URL if repoUrl not provided
+      let remoteUrlToUse = repoUrl;
+      if (!remoteUrlToUse && origin.refs?.push) {
+        remoteUrlToUse = origin.refs.push;
+        console.log('[GitManager] Using existing remote URL:', remoteUrlToUse);
+      }
+
+      // If accessToken provided, update remote URL with auth
+      if (accessToken && remoteUrlToUse) {
+        const parsed = parseGitHubUrl(remoteUrlToUse);
+        if (parsed.isValid) {
+          const authUrl = `https://${accessToken}@github.com/${parsed.owner}/${parsed.repo}.git`;
+          await git.remote(['set-url', 'origin', authUrl]);
+          console.log('[GitManager] Updated remote URL with auth token');
+        }
+      } else if (accessToken && origin.refs?.push) {
+        // Try to parse from existing origin URL
+        const existingUrl = origin.refs.push;
+        const parsed = parseGitHubUrl(existingUrl);
+        if (parsed.isValid) {
+          const authUrl = `https://${accessToken}@github.com/${parsed.owner}/${parsed.repo}.git`;
+          await git.remote(['set-url', 'origin', authUrl]);
+          console.log('[GitManager] Updated remote URL with auth token from existing origin');
+        }
+      }
+
+      // Get current branch
+      const branchInfo = await git.branch();
+      const currentBranch = branchInfo.current || 'main';
+
+      // Push to remote
+      try {
+        await git.push(['origin', currentBranch]);
+        console.log(`[GitManager] Pushed changes to remote (${currentBranch})`);
+        return true;
+      } catch {
+        console.log('[GitManager] Push to current branch failed, trying alternatives...');
+        // Try pushing to main or master
+        try {
+          await git.push(['origin', 'main']);
+          return true;
+        } catch {
+          try {
+            await git.push(['origin', 'master']);
+            return true;
+          } catch (finalErr) {
+            console.error('[GitManager] All push attempts failed:', finalErr);
+            return false;
+          }
+        }
+      }
+    } catch (error) {
+      console.error('[GitManager] Push failed:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Commit and push changes in one operation
+   */
+  async commitAndPush(
+    repoPath: string, 
+    message: string, 
+    accessToken?: string, 
+    repoUrl?: string
+  ): Promise<{ committed: boolean; pushed: boolean }> {
+    const git = simpleGit(repoPath);
+    
+    // Check if there are changes
+    const status = await git.status();
+    if (status.files.length === 0) {
+      return { committed: false, pushed: false };
+    }
+
+    // Commit
+    await git.add('.');
+    await git.commit(message);
+    
+    // Push if credentials available
+    const pushed = await this.push(repoPath, accessToken, repoUrl);
+    
+    return { committed: true, pushed };
   }
 
   async revertToCommit(repoPath: string, commitSha: string): Promise<void> {

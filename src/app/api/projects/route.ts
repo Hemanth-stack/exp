@@ -118,7 +118,7 @@ async function handleGitHubImport(
   userId: string,
   user: { githubAccessToken?: string | null } | null
 ) {
-  const { name, description, githubUrl, autoStartPreview } = data;
+  const { name, description, githubUrl, autoStartPreview = true } = data;
 
   // Validate the GitHub URL
   const parsed = parseGitHubUrl(githubUrl);
@@ -156,7 +156,7 @@ async function handleGitHubImport(
 
   // Clone the repository
   let repoPath: string | null = null;
-  let detectedTemplate: string = 'nextjs';
+  let detectedTemplate: string = 'unknown';
   
   try {
     const result = await gitManager.cloneRepository(
@@ -165,7 +165,7 @@ async function handleGitHubImport(
       accessToken
     );
     repoPath = result.repoPath;
-    detectedTemplate = result.detectedTemplate === 'unknown' ? 'nextjs' : result.detectedTemplate;
+    detectedTemplate = result.detectedTemplate;
 
     // Update project with repo path and detected template
     await db
@@ -194,10 +194,21 @@ async function handleGitHubImport(
     );
   }
 
-  // Optionally start preview after clone
+  // Check if preview is supported for this project type
+  const supportedTypes = [
+    'nextjs', 'vite-react', 'vue', 'angular', 'svelte', 'express', 'node', 'react',
+    'python', 'flask', 'django', 'fastapi', 'streamlit',
+    'java', 'static'
+  ];
+  const isPreviewSupported = supportedTypes.some(t => 
+    detectedTemplate.toLowerCase().includes(t.toLowerCase())
+  ) || detectedTemplate !== 'unknown';
+  
+  // Start preview after clone (default: true)
   let preview = null;
-  if (autoStartPreview && repoPath) {
+  if (autoStartPreview && repoPath && isPreviewSupported) {
     try {
+      console.log(`[Projects API] Starting preview for ${newProject.id}...`);
       preview = await previewManager.startPreview(newProject.id, repoPath, userId);
       await db
         .update(projects)
@@ -206,9 +217,14 @@ async function handleGitHubImport(
           containerPort: preview.port 
         })
         .where(eq(projects.id, newProject.id));
+      console.log(`[Projects API] Preview started on port ${preview.port}`);
     } catch (error) {
       console.error('Error starting preview after clone:', error);
-      // Don't fail - project was created successfully
+      // Don't fail - project was created successfully, update status
+      await db
+        .update(projects)
+        .set({ status: 'created' })
+        .where(eq(projects.id, newProject.id));
     }
   }
 
@@ -221,6 +237,8 @@ async function handleGitHubImport(
 
   return NextResponse.json({
     ...updatedProject,
+    detectedType: detectedTemplate,
+    isPreviewSupported,
     preview: preview ? {
       url: `http://localhost:${preview.port}`,
       port: preview.port,

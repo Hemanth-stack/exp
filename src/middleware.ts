@@ -14,6 +14,7 @@ export const config = {
     '/dashboard/:path*', 
     '/settings/:path*', 
     '/builder/:path*',
+    '/sandbox/:path*',
     '/api/projects/:path*',
     '/api/sandbox/:path*',
     '/api/containers/:path*',

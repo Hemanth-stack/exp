@@ -152,6 +152,7 @@ interface GitHubRepoInfo {
   language?: string;
   stargazersCount: number;
   htmlUrl: string;
+  isPreviewSupported?: boolean;
 }
 
 export default function DashboardPage() {
@@ -529,7 +530,7 @@ export default function DashboardPage() {
                   </p>
                 )}
                 {githubRepoInfo && (
-                  <div className="rounded-md bg-muted p-3 text-sm space-y-1">
+                  <div className="rounded-md bg-muted p-3 text-sm space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="font-medium">{githubRepoInfo.fullName}</span>
                       {githubRepoInfo.isPrivate && (
@@ -543,6 +544,14 @@ export default function DashboardPage() {
                       {githubRepoInfo.language && <span>{githubRepoInfo.language}</span>}
                       <span>⭐ {githubRepoInfo.stargazersCount}</span>
                     </div>
+                    {githubRepoInfo.isPreviewSupported === false && (
+                      <div className="mt-2 p-2 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded text-xs text-yellow-800 dark:text-yellow-200">
+                        <AlertCircle className="inline h-3 w-3 mr-1" />
+                        <strong>Note:</strong> This appears to be a {githubRepoInfo.language} project. 
+                        Live preview is only available for JavaScript/TypeScript projects (Next.js, React, Vite).
+                        You can still import and browse the code.
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -571,12 +580,17 @@ export default function DashboardPage() {
                 <input
                   type="checkbox"
                   id="auto-preview"
-                  checked={autoStartPreview}
+                  checked={autoStartPreview && githubRepoInfo?.isPreviewSupported !== false}
                   onChange={(e) => setAutoStartPreview(e.target.checked)}
-                  className="h-4 w-4 rounded border-gray-300"
+                  disabled={githubRepoInfo?.isPreviewSupported === false}
+                  className="h-4 w-4 rounded border-gray-300 disabled:opacity-50"
                 />
-                <Label htmlFor="auto-preview" className="text-sm font-normal cursor-pointer">
+                <Label 
+                  htmlFor="auto-preview" 
+                  className={`text-sm font-normal cursor-pointer ${githubRepoInfo?.isPreviewSupported === false ? 'text-muted-foreground' : ''}`}
+                >
                   Start preview automatically after import
+                  {githubRepoInfo?.isPreviewSupported === false && ' (not available for this project)'}
                 </Label>
               </div>
             </TabsContent>

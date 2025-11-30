@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-config';
 import { db } from '@/db';
-import { projects } from '@/db/schema';
+import { projects, users } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import fs from 'fs/promises';
 import path from 'path';
@@ -128,19 +128,48 @@ export async function PUT(
     // Write the file
     await fs.writeFile(fullPath, content, 'utf-8');
 
-    // Auto-commit the changes
+    // Auto-commit and push the changes
+    let syncResult = { committed: false, pushed: false };
     try {
-      const commitMessage = `Updated file: ${filePath}`;
-      await gitManager.commit(project.gitRepoPath, commitMessage);
+      // Get user's GitHub token for push
+      const [user] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, session.user.id))
+        .limit(1);
+
+      if (user?.githubAccessToken) {
+        const commitMessage = `Updated file: ${filePath}`;
+        
+        // Pass the GitHub URL if available, or let the git manager use existing remote
+        syncResult = await gitManager.commitAndPush(
+          project.gitRepoPath, 
+          commitMessage,
+          user.githubAccessToken,
+          project.githubRepoUrl || undefined
+        );
+        
+        if (syncResult.pushed) {
+          console.log(`[Files API] Pushed changes to GitHub for project ${projectId}`);
+        } else if (syncResult.committed) {
+          console.log(`[Files API] Committed changes locally for project ${projectId} (push failed or no remote)`);
+        }
+      } else {
+        // Just commit locally if no GitHub token
+        await gitManager.commit(project.gitRepoPath, `Updated file: ${filePath}`);
+        syncResult.committed = true;
+        console.log(`[Files API] Committed changes locally (no GitHub token)`);
+      }
     } catch (commitErr) {
-      console.error('Auto-commit error:', commitErr);
-      // Don't fail the request if commit fails
+      console.error('Auto-commit/push error:', commitErr);
+      // Don't fail the request if commit/push fails
     }
 
     return NextResponse.json({ 
       success: true,
       message: 'File saved successfully',
-      path: filePath 
+      path: filePath,
+      gitSync: syncResult,
     });
   } catch (error) {
     console.error('Error saving file content:', error);

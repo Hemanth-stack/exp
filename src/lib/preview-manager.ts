@@ -26,6 +26,19 @@ export interface ContainerLimitError extends Error {
   maxAllowed: number;
 }
 
+interface ProjectConfig {
+  type: string;
+  supported: boolean;
+  errorMessage?: string;
+  image: string;
+  command?: string[];
+  workDir: string;
+  mountPath: string;
+  containerPort: number;
+  env: string[];
+  startupTime: number;
+}
+
 class PreviewManager {
   private portStart = 4001;
   private portEnd = 5000;
@@ -317,44 +330,35 @@ class PreviewManager {
     const port = await this.findAvailablePort();
     
     try {
-      // Check if package.json exists
-      const packagePath = path.join(repoPath, 'package.json');
-      await fs.access(packagePath);
-      const packageJson = JSON.parse(await fs.readFile(packagePath, 'utf-8'));
+      // Detect project type and get container config
+      const projectConfig = await this.detectProjectType(repoPath);
+      console.log(`[PreviewManager] Detected project type: ${projectConfig.type}`);
 
-      // Determine if this is a Next.js project
-      const isNextJs = packageJson.dependencies?.next || packageJson.devDependencies?.next;
-      
-      // Use our sandbox image for Next.js projects
-      const imageName = isNextJs ? 'nextjs-sandbox:latest' : 'node:18-alpine';
-      const devCommand = packageJson.scripts?.dev || 'npm run dev';
-      
-      // Create container
+      if (!projectConfig.supported) {
+        throw new Error(projectConfig.errorMessage || 'Unsupported project type');
+      }
+
+      // Create container based on project type
       const container = await docker.createContainer({
-        Image: imageName,
+        Image: projectConfig.image,
         name: `preview-${projectId}`,
-        WorkingDir: '/app',
-        Cmd: isNextJs 
-          ? undefined
-          : ['sh', '-c', `npm install && ${devCommand}`],
+        WorkingDir: projectConfig.workDir,
+        Cmd: projectConfig.command,
         ExposedPorts: {
-          '3000/tcp': {},
+          [`${projectConfig.containerPort}/tcp`]: {},
         },
         HostConfig: {
           PortBindings: {
-            '3000/tcp': [{ HostPort: port.toString() }],
+            [`${projectConfig.containerPort}/tcp`]: [{ HostPort: port.toString() }],
           },
-          Binds: [`${repoPath}:/app/user-project`],
+          Binds: [`${repoPath}:${projectConfig.mountPath}`],
           AutoRemove: false,
         },
-        Env: [
-          'NODE_ENV=development',
-          'PORT=3000',
-          'HOSTNAME=0.0.0.0',
-        ],
+        Env: projectConfig.env,
         Labels: {
           'preview.projectId': projectId,
           'preview.userId': userId,
+          'preview.type': projectConfig.type,
           'preview.createdAt': new Date().toISOString(),
         },
       });
@@ -376,8 +380,7 @@ class PreviewManager {
       await this.saveContainerToRedis(previewContainer);
 
       // Start background check for container readiness
-      const startupTime = isNextJs ? 30000 : 8000;
-      this.waitForContainerReady(projectId, container.id, port, startupTime);
+      this.waitForContainerReady(projectId, container.id, port, projectConfig.startupTime);
 
       return previewContainer;
     } catch (error) {
@@ -389,6 +392,334 @@ class PreviewManager {
         // Ignore Redis errors during cleanup
       }
       throw error;
+    }
+  }
+
+  /**
+   * Detect project type and return container configuration
+   */
+  private async detectProjectType(repoPath: string): Promise<ProjectConfig> {
+    // Check for various project files
+    const checks = await Promise.all([
+      this.fileExists(path.join(repoPath, 'package.json')),
+      this.fileExists(path.join(repoPath, 'requirements.txt')),
+      this.fileExists(path.join(repoPath, 'pyproject.toml')),
+      this.fileExists(path.join(repoPath, 'pom.xml')),
+      this.fileExists(path.join(repoPath, 'build.gradle')),
+      this.fileExists(path.join(repoPath, 'index.html')),
+      this.fileExists(path.join(repoPath, 'Cargo.toml')),
+      this.fileExists(path.join(repoPath, 'go.mod')),
+    ]);
+
+    const [hasPackageJson, hasRequirements, hasPyproject, hasPom, hasGradle, hasIndexHtml, hasCargo, hasGoMod] = checks;
+
+    // JavaScript/TypeScript project
+    if (hasPackageJson) {
+      return this.getNodeProjectConfig(repoPath);
+    }
+
+    // Python project
+    if (hasRequirements || hasPyproject) {
+      return this.getPythonProjectConfig(repoPath, hasRequirements);
+    }
+
+    // Java project
+    if (hasPom || hasGradle) {
+      return this.getJavaProjectConfig(repoPath, hasPom);
+    }
+
+    // Static HTML project
+    if (hasIndexHtml) {
+      return this.getStaticProjectConfig(repoPath);
+    }
+
+    // Go project
+    if (hasGoMod) {
+      return {
+        type: 'go',
+        supported: false,
+        errorMessage: 'Go projects are not yet supported for preview. Coming soon!',
+        image: '',
+        command: [],
+        workDir: '',
+        mountPath: '',
+        containerPort: 8080,
+        env: [],
+        startupTime: 10000,
+      };
+    }
+
+    // Rust project
+    if (hasCargo) {
+      return {
+        type: 'rust',
+        supported: false,
+        errorMessage: 'Rust projects are not yet supported for preview. Coming soon!',
+        image: '',
+        command: [],
+        workDir: '',
+        mountPath: '',
+        containerPort: 8080,
+        env: [],
+        startupTime: 10000,
+      };
+    }
+
+    // Unknown project type
+    return {
+      type: 'unknown',
+      supported: false,
+      errorMessage: 'Could not detect project type. Supported types: Node.js (Next.js, React, Vue, Angular, Svelte, Vite), Python (Flask, Django, FastAPI), Java (Spring Boot, Maven, Gradle), Static HTML.',
+      image: '',
+      command: [],
+      workDir: '',
+      mountPath: '',
+      containerPort: 3000,
+      env: [],
+      startupTime: 10000,
+    };
+  }
+
+  /**
+   * Get Node.js project configuration
+   */
+  private async getNodeProjectConfig(repoPath: string): Promise<ProjectConfig> {
+    const packagePath = path.join(repoPath, 'package.json');
+    const packageJson = JSON.parse(await fs.readFile(packagePath, 'utf-8'));
+    const deps = { ...packageJson.dependencies, ...packageJson.devDependencies };
+
+    // Detect framework
+    const isNextJs = !!deps['next'];
+    const isVue = !!deps['vue'];
+    const isAngular = !!deps['@angular/core'];
+    const isSvelte = !!deps['svelte'];
+    const isVite = !!deps['vite'];
+    const isExpress = !!deps['express'];
+    const isReact = !!deps['react'] || !!deps['react-dom'];
+
+    let type = 'node';
+    let image = 'node:18-alpine';
+    let command: string[];
+    let containerPort = 3000;
+    let startupTime = 15000;
+    let workDir = '/app';
+    let mountPath = '/app';
+
+    if (isNextJs) {
+      type = 'nextjs';
+      // Check if custom sandbox image exists, otherwise use node:18-alpine
+      const useCustomImage = await this.dockerImageExists('nextjs-sandbox:latest');
+      if (useCustomImage) {
+        image = 'nextjs-sandbox:latest';
+        command = ['sh', '-c', 'cd /app/user-project && npm install && npm run dev'];
+        workDir = '/app';
+        mountPath = '/app/user-project';
+      } else {
+        image = 'node:18-alpine';
+        command = ['sh', '-c', 'npm install && npm run dev'];
+        workDir = '/app';
+        mountPath = '/app';
+      }
+      startupTime = 30000;
+    } else if (isVue) {
+      type = 'vue';
+      command = ['sh', '-c', 'npm install && npm run dev -- --host 0.0.0.0'];
+      containerPort = 5173;
+      startupTime = 20000;
+    } else if (isAngular) {
+      type = 'angular';
+      command = ['sh', '-c', 'npm install && npx ng serve --host 0.0.0.0 --disable-host-check'];
+      containerPort = 4200;
+      startupTime = 45000;
+    } else if (isSvelte) {
+      type = 'svelte';
+      command = ['sh', '-c', 'npm install && npm run dev -- --host 0.0.0.0'];
+      containerPort = 5173;
+      startupTime = 15000;
+    } else if (isVite) {
+      type = 'vite';
+      command = ['sh', '-c', 'npm install && npm run dev -- --host 0.0.0.0'];
+      containerPort = 5173;
+      startupTime = 15000;
+    } else if (isReact) {
+      // React without Vite (create-react-app style)
+      type = 'react';
+      command = ['sh', '-c', 'npm install && npm start'];
+      containerPort = 3000;
+      startupTime = 30000;
+    } else if (isExpress) {
+      type = 'express';
+      command = ['sh', '-c', 'npm install && npm start'];
+      startupTime = 10000;
+    } else {
+      // Generic Node.js - try to detect the right start command
+      const scripts = packageJson.scripts || {};
+      let startCmd = 'npm start';
+      
+      if (scripts.dev) {
+        startCmd = 'npm run dev';
+      } else if (scripts.start) {
+        startCmd = 'npm start';
+      } else if (scripts.serve) {
+        startCmd = 'npm run serve';
+      }
+      
+      command = ['sh', '-c', `npm install && ${startCmd}`];
+    }
+
+    return {
+      type,
+      supported: true,
+      image,
+      command,
+      workDir,
+      mountPath,
+      containerPort,
+      env: [
+        'NODE_ENV=development',
+        `PORT=${containerPort}`,
+        'HOST=0.0.0.0',
+        'HOSTNAME=0.0.0.0',
+      ],
+      startupTime,
+    };
+  }
+
+  /**
+   * Check if a Docker image exists locally
+   */
+  private async dockerImageExists(imageName: string): Promise<boolean> {
+    try {
+      const images = await docker.listImages();
+      return images.some(img => 
+        img.RepoTags?.includes(imageName) || 
+        img.RepoTags?.some(tag => tag.startsWith(imageName.split(':')[0]))
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get Python project configuration
+   */
+  private async getPythonProjectConfig(repoPath: string, hasRequirements: boolean): Promise<ProjectConfig> {
+    // Check for common Python web frameworks
+    let framework = 'python';
+    let command: string[];
+    let containerPort = 8000;
+
+    // Read requirements to detect framework
+    if (hasRequirements) {
+      try {
+        const requirements = await fs.readFile(path.join(repoPath, 'requirements.txt'), 'utf-8');
+        const reqLower = requirements.toLowerCase();
+
+        if (reqLower.includes('django')) {
+          framework = 'django';
+          command = ['sh', '-c', 'pip install -r requirements.txt && python manage.py runserver 0.0.0.0:8000'];
+        } else if (reqLower.includes('flask')) {
+          framework = 'flask';
+          command = ['sh', '-c', 'pip install -r requirements.txt && flask run --host=0.0.0.0 --port=8000'];
+        } else if (reqLower.includes('fastapi')) {
+          framework = 'fastapi';
+          command = ['sh', '-c', 'pip install -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000 --reload'];
+        } else if (reqLower.includes('streamlit')) {
+          framework = 'streamlit';
+          containerPort = 8501;
+          command = ['sh', '-c', 'pip install -r requirements.txt && streamlit run app.py --server.address 0.0.0.0'];
+        } else {
+          // Generic Python - try to find main file
+          const mainFiles = ['main.py', 'app.py', 'run.py', 'server.py'];
+          let mainFile = 'main.py';
+          for (const f of mainFiles) {
+            if (await this.fileExists(path.join(repoPath, f))) {
+              mainFile = f;
+              break;
+            }
+          }
+          command = ['sh', '-c', `pip install -r requirements.txt && python ${mainFile}`];
+        }
+      } catch {
+        command = ['sh', '-c', 'pip install -r requirements.txt && python main.py'];
+      }
+    } else {
+      // pyproject.toml based project
+      command = ['sh', '-c', 'pip install -e . && python -m app'];
+    }
+
+    return {
+      type: framework,
+      supported: true,
+      image: 'python:3.11-slim',
+      command,
+      workDir: '/app',
+      mountPath: '/app',
+      containerPort,
+      env: [
+        'PYTHONUNBUFFERED=1',
+        'FLASK_APP=app.py',
+        'FLASK_ENV=development',
+      ],
+      startupTime: 20000,
+    };
+  }
+
+  /**
+   * Get Java project configuration
+   */
+  private async getJavaProjectConfig(repoPath: string, hasPom: boolean): Promise<ProjectConfig> {
+    const buildTool = hasPom ? 'maven' : 'gradle';
+    let command: string[];
+
+    if (hasPom) {
+      command = ['sh', '-c', 'mvn spring-boot:run -Dspring-boot.run.arguments="--server.address=0.0.0.0"'];
+    } else {
+      command = ['sh', '-c', './gradlew bootRun --args="--server.address=0.0.0.0"'];
+    }
+
+    return {
+      type: `java-${buildTool}`,
+      supported: true,
+      image: 'maven:3.9-eclipse-temurin-17',
+      command,
+      workDir: '/app',
+      mountPath: '/app',
+      containerPort: 8080,
+      env: [
+        'JAVA_OPTS=-Xmx512m',
+        'SERVER_PORT=8080',
+      ],
+      startupTime: 60000, // Java apps take longer to start
+    };
+  }
+
+  /**
+   * Get static HTML project configuration
+   */
+  private async getStaticProjectConfig(_repoPath: string): Promise<ProjectConfig> {
+    return {
+      type: 'static',
+      supported: true,
+      image: 'nginx:alpine',
+      command: undefined, // nginx uses default command
+      workDir: '/usr/share/nginx/html',
+      mountPath: '/usr/share/nginx/html',
+      containerPort: 80,
+      env: [],
+      startupTime: 5000,
+    };
+  }
+
+  /**
+   * Check if a file exists
+   */
+  private async fileExists(filePath: string): Promise<boolean> {
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      return false;
     }
   }
 

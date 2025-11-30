@@ -56,7 +56,29 @@ export async function POST(request: Request) {
       });
     }
 
-    // Return repo info
+    // Return repo info with preview support based on language
+    const language = validation.repoInfo?.language?.toLowerCase() || '';
+    
+    // Expanded language support
+    const supportedLanguages = [
+      'javascript', 'typescript', 'tsx', 'jsx',  // JS/TS
+      'python',                                    // Python (Flask, Django, FastAPI)
+      'java', 'kotlin',                           // Java/Spring
+      'html', 'css',                              // Static sites
+      'vue', 'svelte',                            // Other frameworks
+    ];
+    
+    const isPreviewSupported = supportedLanguages.includes(language) || 
+      language === '' || // Unknown language - will try to auto-detect
+      validation.repoInfo?.name?.toLowerCase().includes('next') ||
+      validation.repoInfo?.name?.toLowerCase().includes('react') ||
+      validation.repoInfo?.name?.toLowerCase().includes('vue') ||
+      validation.repoInfo?.name?.toLowerCase().includes('angular') ||
+      validation.repoInfo?.name?.toLowerCase().includes('flask') ||
+      validation.repoInfo?.name?.toLowerCase().includes('django') ||
+      validation.repoInfo?.name?.toLowerCase().includes('fastapi') ||
+      validation.repoInfo?.name?.toLowerCase().includes('spring');
+    
     return NextResponse.json({
       valid: true,
       repo: {
@@ -69,6 +91,7 @@ export async function POST(request: Request) {
         language: validation.repoInfo?.language,
         stargazersCount: validation.repoInfo?.stargazers_count,
         htmlUrl: validation.repoInfo?.html_url,
+        isPreviewSupported,
       },
     });
   } catch (error) {

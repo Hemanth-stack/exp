@@ -80,12 +80,13 @@ export async function POST(request: NextRequest) {
       agent: type,
     });
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Mastra API Error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
       { 
         error: 'Failed to process request',
-        details: error.message 
+        details: errorMessage 
       },
       { status: 500 }
     );

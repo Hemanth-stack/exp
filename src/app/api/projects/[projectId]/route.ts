@@ -6,7 +6,6 @@ import { projects, conversations, messages } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { z } from 'zod';
 import fs from 'fs/promises';
-import path from 'path';
 
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(255).optional(),

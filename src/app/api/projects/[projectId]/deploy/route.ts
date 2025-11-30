@@ -6,8 +6,6 @@ import { projects, deployments } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { GitManager } from '@/lib/git-manager';
 import Docker from 'dockerode';
-import path from 'path';
-import fs from 'fs/promises';
 
 const docker = new Docker();
 
@@ -189,7 +187,7 @@ export async function POST(
     }
 
     // Deploy
-    const { url, containerId } = await deployProject(
+    const { url } = await deployProject(
       project.id,
       project.name,
       project.gitRepoPath

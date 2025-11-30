@@ -11,7 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/components/ui/use-toast';
-import { Plus, Sparkles, LogOut, Settings, Play, Square, Trash2, Search, Loader2, Rocket } from 'lucide-react';
+import { Plus, Sparkles, LogOut, Settings, Trash2, Search, Loader2 } from 'lucide-react';
 
 interface Project {
   id: string;
@@ -49,6 +49,7 @@ export default function DashboardPage() {
     if (session) {
       fetchProjects();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
   useEffect(() => {

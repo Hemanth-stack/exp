@@ -8,7 +8,6 @@ import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useToast } from '@/components/ui/use-toast';
 import { FileExplorer } from '@/components/file-explorer';
-import { CodeViewer } from '@/components/code-viewer';
 import { 
   ArrowLeft, 
   Send, 
@@ -21,6 +20,10 @@ import {
   Play,
   Square,
   Rocket,
+  Eye,
+  Code,
+  Save,
+  X,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -41,6 +44,14 @@ interface FileNode {
   modified?: boolean;
 }
 
+interface OpenTab {
+  path: string;
+  name: string;
+  content: string;
+  language: string;
+  modified: boolean;
+}
+
 const deviceSizes = {
   desktop: { width: '100%', label: 'Desktop' },
   tablet: { width: '768px', label: 'Tablet' },
@@ -56,27 +67,39 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
   const unwrappedParams = use(params);
   const projectId = unwrappedParams.projectId;
   
-  const [project, setProject] = useState<any>(null);
+  const [project, setProject] = useState<{
+    id: string;
+    name: string;
+    description?: string;
+    framework: string;
+    gitRepoPath?: string;
+    status: string;
+  } | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [currentMessage, setCurrentMessage] = useState('');
+  const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewStatus, setPreviewStatus] = useState<'stopped' | 'starting' | 'running' | 'error'>('stopped');
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
   const [previewKey, setPreviewKey] = useState(0);
   const [files, setFiles] = useState<FileNode[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [fileContent, setFileContent] = useState<string>('');
-  const [fileLanguage, setFileLanguage] = useState<string>('text');
-  const [leftWidth] = useState(30);
-  const [centerWidth] = useState(40);
   const [isDeploying, setIsDeploying] = useState(false);
   const [deploymentUrl, setDeploymentUrl] = useState<string | null>(null);
+  
+  // New states for toggle view and VS Code-like editing
+  const [viewMode, setViewMode] = useState<'preview' | 'code'>('preview');
+  const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
+  const [activeTab, setActiveTab] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const editorRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (status === 'unauthenticated') {
@@ -88,9 +111,11 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
     if (session) {
       fetchProject();
       fetchFiles();
+      fetchConversationHistory();
       checkPreviewStatus();
     }
-  }, [session]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, projectId]);
 
   useEffect(() => {
     scrollToBottom();
@@ -119,6 +144,42 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
     }
   };
 
+  const fetchConversationHistory = async () => {
+    setIsLoadingHistory(true);
+    try {
+      const convResponse = await fetch(`/api/projects/${projectId}/chat`);
+      if (convResponse.ok) {
+        const convData = await convResponse.json();
+        
+        if (convData.conversations && convData.conversations.length > 0) {
+          const latestConversation = convData.conversations[0];
+          setConversationId(latestConversation.id);
+          
+          const msgResponse = await fetch(
+            `/api/projects/${projectId}/chat?conversationId=${latestConversation.id}`
+          );
+          
+          if (msgResponse.ok) {
+            const msgData = await msgResponse.json();
+            if (msgData.messages && msgData.messages.length > 0) {
+              const loadedMessages: Message[] = msgData.messages.map((msg: { id: string; role: string; content: string; createdAt: string }) => ({
+                id: msg.id,
+                role: msg.role as 'user' | 'assistant',
+                content: msg.content,
+                createdAt: new Date(msg.createdAt),
+              }));
+              setMessages(loadedMessages);
+            }
+          }
+        }
+      }
+    } catch {
+      console.error('Error fetching conversation history');
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  };
+
   const fetchFiles = async () => {
     try {
       const response = await fetch(`/api/projects/${projectId}/files`);
@@ -132,15 +193,35 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
   };
 
   const fetchFileContent = async (filePath: string) => {
+    // Check if file is already open
+    const existingTab = openTabs.find(tab => tab.path === filePath);
+    if (existingTab) {
+      setActiveTab(filePath);
+      setSelectedFile(filePath);
+      setViewMode('code');
+      return;
+    }
+
     try {
       const response = await fetch(
         `/api/projects/${projectId}/files/content?path=${encodeURIComponent(filePath)}`
       );
       if (response.ok) {
         const data = await response.json();
-        setFileContent(data.content);
-        setFileLanguage(data.language);
+        const fileName = filePath.split('/').pop() || filePath;
+        
+        const newTab: OpenTab = {
+          path: filePath,
+          name: fileName,
+          content: data.content,
+          language: data.language,
+          modified: false,
+        };
+        
+        setOpenTabs(prev => [...prev, newTab]);
+        setActiveTab(filePath);
         setSelectedFile(filePath);
+        setViewMode('code');
       }
     } catch (error) {
       console.error('Error fetching file content:', error);
@@ -151,6 +232,96 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
       });
     }
   };
+
+  const handleTabClose = (path: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    const tab = openTabs.find(t => t.path === path);
+    
+    if (tab?.modified) {
+      if (!confirm('You have unsaved changes. Close anyway?')) {
+        return;
+      }
+    }
+    
+    setOpenTabs(prev => prev.filter(t => t.path !== path));
+    
+    if (activeTab === path) {
+      const remaining = openTabs.filter(t => t.path !== path);
+      if (remaining.length > 0) {
+        setActiveTab(remaining[remaining.length - 1].path);
+        setSelectedFile(remaining[remaining.length - 1].path);
+      } else {
+        setActiveTab(null);
+        setSelectedFile(null);
+      }
+    }
+  };
+
+  const handleEditorChange = (content: string) => {
+    setOpenTabs(prev => 
+      prev.map(tab => 
+        tab.path === activeTab 
+          ? { ...tab, content, modified: true }
+          : tab
+      )
+    );
+  };
+
+  const handleSaveFile = async () => {
+    const currentTab = openTabs.find(t => t.path === activeTab);
+    if (!currentTab) return;
+
+    setIsSaving(true);
+    try {
+      const response = await fetch(`/api/projects/${projectId}/files/content`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          path: currentTab.path,
+          content: currentTab.content,
+        }),
+      });
+
+      if (response.ok) {
+        setOpenTabs(prev =>
+          prev.map(tab =>
+            tab.path === activeTab ? { ...tab, modified: false } : tab
+          )
+        );
+        toast({
+          title: 'File saved',
+          description: `Saved ${currentTab.name}`,
+        });
+        
+        // Refresh preview if running
+        if (previewStatus === 'running') {
+          setTimeout(() => setPreviewKey(prev => prev + 1), 500);
+        }
+      } else {
+        throw new Error('Failed to save');
+      }
+    } catch {
+      toast({
+        title: 'Error',
+        description: 'Failed to save file',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Keyboard shortcut for save
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault();
+        handleSaveFile();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeTab, openTabs]);
 
   const checkPreviewStatus = async () => {
     try {
@@ -179,8 +350,6 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
       if (response.ok) {
         const data = await response.json();
         setPreviewUrl(data.preview.url);
-        
-        // Poll for status until running
         pollPreviewStatus();
       } else {
         setPreviewStatus('error');
@@ -190,7 +359,7 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
           variant: 'destructive',
         });
       }
-    } catch (error) {
+    } catch {
       setPreviewStatus('error');
       toast({
         title: 'Error',
@@ -201,7 +370,7 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
   };
 
   const pollPreviewStatus = async () => {
-    const maxAttempts = 30; // 30 attempts * 2 seconds = 60 seconds max
+    const maxAttempts = 30;
     let attempts = 0;
     
     const poll = async () => {
@@ -228,7 +397,6 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
           }
         }
         
-        // Continue polling if still starting
         attempts++;
         if (attempts < maxAttempts) {
           setTimeout(poll, 2000);
@@ -245,7 +413,6 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
       }
     };
     
-    // Start polling after 2 seconds
     setTimeout(poll, 2000);
   };
 
@@ -259,7 +426,7 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
       toast({
         title: 'Preview stopped',
       });
-    } catch (error) {
+    } catch {
       toast({
         title: 'Error',
         description: 'Failed to stop preview',
@@ -298,7 +465,10 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
       const response = await fetch(`/api/projects/${projectId}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMessage }),
+        body: JSON.stringify({ 
+          message: userMessage,
+          conversationId: conversationId 
+        }),
         signal: abortControllerRef.current.signal,
       });
 
@@ -325,7 +495,16 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
               if (data.type === 'text' && data.content) {
                 assistantContent += data.content;
                 setCurrentMessage(assistantContent);
+              } else if (data.type === 'file_created') {
+                toast({
+                  title: 'File created',
+                  description: `Created ${data.file?.path || 'file'}`,
+                });
               } else if (data.type === 'done') {
+                if (data.conversationId) {
+                  setConversationId(data.conversationId);
+                }
+                
                 const assistantMessage: Message = {
                   id: Date.now().toString(),
                   role: 'assistant',
@@ -334,16 +513,22 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                 };
                 setMessages(prev => [...prev, assistantMessage]);
                 setCurrentMessage('');
-                fetchFiles();
+                
+                if (data.filesCreated > 0) {
+                  fetchFiles();
+                  // Close and refresh any open tabs for modified files
+                  setOpenTabs([]);
+                  setActiveTab(null);
+                }
               }
-            } catch (e) {
+            } catch {
               // Ignore parse errors
             }
           }
         }
       }
-    } catch (error: any) {
-      if (error.name !== 'AbortError') {
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name !== 'AbortError') {
         toast({
           title: 'Error',
           description: 'Failed to send message',
@@ -383,7 +568,7 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
           variant: 'destructive',
         });
       }
-    } catch (error) {
+    } catch {
       toast({
         title: 'Error',
         description: 'Failed to deploy project',
@@ -398,6 +583,8 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
     setInputValue(`Please modify the file ${filePath}:\n\n`);
   };
 
+  const currentTab = openTabs.find(t => t.path === activeTab);
+
   if (status === 'loading' || !project) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -405,8 +592,6 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
       </div>
     );
   }
-
-  const rightWidth = 100 - leftWidth - centerWidth;
 
   return (
     <div className="h-screen flex flex-col bg-background">
@@ -453,8 +638,8 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
       </header>
 
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Panel - Chat */}
-        <div className="border-r bg-card" style={{ width: `${leftWidth}%` }}>
+        {/* Left Panel - Chat (30%) */}
+        <div className="border-r bg-card" style={{ width: '30%' }}>
           <div className="h-full flex flex-col">
             <div className="p-3 border-b">
               <h2 className="font-semibold">AI Assistant</h2>
@@ -462,22 +647,35 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
             
             <ScrollArea className="flex-1 p-4">
               <div className="space-y-4">
-                {messages.map((message) => (
-                  <div
-                    key={message.id}
-                    className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div
-                      className={`max-w-[80%] rounded-lg p-3 ${
-                        message.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-muted'
-                      }`}
-                    >
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {message.content}
-                      </ReactMarkdown>
-                    </div>
+                {isLoadingHistory ? (
+                  <div className="flex justify-center py-4">
+                    <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                   </div>
-                ))}
+                ) : messages.length === 0 ? (
+                  <div className="text-center text-muted-foreground py-8">
+                    <p className="mb-2">No messages yet</p>
+                    <p className="text-sm">Ask AI to help you build your app!</p>
+                  </div>
+                ) : (
+                  messages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                    >
+                      <div
+                        className={`max-w-[85%] rounded-lg p-3 ${
+                          message.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-muted'
+                        }`}
+                      >
+                        <div className="prose prose-sm dark:prose-invert max-w-none">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {message.content}
+                          </ReactMarkdown>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
                 
                 {currentMessage && (
                   <div className="flex justify-start">
@@ -522,125 +720,237 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
           </div>
         </div>
 
-        {/* Center Panel - Live Preview */}
-        <div className="bg-background" style={{ width: `${centerWidth}%` }}>
+        {/* Right Panel - Toggle between Preview and Code Editor (70%) */}
+        <div className="bg-background flex-1" style={{ width: '70%' }}>
           <div className="h-full flex flex-col">
+            {/* Toggle Header */}
             <div className="p-2 border-b flex items-center justify-between bg-card">
               <div className="flex items-center gap-2">
-                <h2 className="font-semibold">Live Preview</h2>
-                <div className="flex gap-1">
-                  {(['desktop', 'tablet', 'mobile'] as const).map((device) => (
-                    <Button
-                      key={device}
-                      variant={previewDevice === device ? 'default' : 'ghost'}
-                      size="sm"
-                      onClick={() => setPreviewDevice(device)}
-                    >
-                      {device === 'desktop' && <Monitor className="h-4 w-4" />}
-                      {device === 'tablet' && <Tablet className="h-4 w-4" />}
-                      {device === 'mobile' && <Smartphone className="h-4 w-4" />}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={refreshPreview}
-                  disabled={previewStatus !== 'running'}
-                >
-                  <RefreshCw className="h-4 w-4" />
-                </Button>
-                {previewUrl && (
+                {/* Toggle Buttons */}
+                <div className="flex bg-muted rounded-lg p-1">
                   <Button
-                    variant="outline"
+                    variant={viewMode === 'preview' ? 'default' : 'ghost'}
                     size="sm"
-                    onClick={() => window.open(previewUrl, '_blank')}
+                    onClick={() => setViewMode('preview')}
+                    className="gap-2"
                   >
-                    <ExternalLink className="h-4 w-4" />
+                    <Eye className="h-4 w-4" />
+                    Live Preview
                   </Button>
+                  <Button
+                    variant={viewMode === 'code' ? 'default' : 'ghost'}
+                    size="sm"
+                    onClick={() => setViewMode('code')}
+                    className="gap-2"
+                  >
+                    <Code className="h-4 w-4" />
+                    Code Editor
+                  </Button>
+                </div>
+
+                {/* Preview Controls - only show in preview mode */}
+                {viewMode === 'preview' && (
+                  <div className="flex gap-1 ml-4">
+                    {(['desktop', 'tablet', 'mobile'] as const).map((device) => (
+                      <Button
+                        key={device}
+                        variant={previewDevice === device ? 'secondary' : 'ghost'}
+                        size="sm"
+                        onClick={() => setPreviewDevice(device)}
+                      >
+                        {device === 'desktop' && <Monitor className="h-4 w-4" />}
+                        {device === 'tablet' && <Tablet className="h-4 w-4" />}
+                        {device === 'mobile' && <Smartphone className="h-4 w-4" />}
+                      </Button>
+                    ))}
+                  </div>
                 )}
-                {previewStatus === 'running' ? (
-                  <Button variant="outline" size="sm" onClick={stopPreview}>
-                    <Square className="h-4 w-4 mr-2" />
-                    Stop
-                  </Button>
-                ) : (
-                  <Button size="sm" onClick={startPreview} disabled={previewStatus === 'starting'}>
-                    {previewStatus === 'starting' ? (
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    ) : (
-                      <Play className="h-4 w-4 mr-2" />
+              </div>
+
+              <div className="flex items-center gap-2">
+                {viewMode === 'preview' ? (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={refreshPreview}
+                      disabled={previewStatus !== 'running'}
+                    >
+                      <RefreshCw className="h-4 w-4" />
+                    </Button>
+                    {previewUrl && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => window.open(previewUrl, '_blank')}
+                      >
+                        <ExternalLink className="h-4 w-4" />
+                      </Button>
                     )}
-                    Start
-                  </Button>
+                    {previewStatus === 'running' ? (
+                      <Button variant="outline" size="sm" onClick={stopPreview}>
+                        <Square className="h-4 w-4 mr-2" />
+                        Stop
+                      </Button>
+                    ) : (
+                      <Button size="sm" onClick={startPreview} disabled={previewStatus === 'starting'}>
+                        {previewStatus === 'starting' ? (
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        ) : (
+                          <Play className="h-4 w-4 mr-2" />
+                        )}
+                        Start
+                      </Button>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    {currentTab?.modified && (
+                      <Button
+                        size="sm"
+                        onClick={handleSaveFile}
+                        disabled={isSaving}
+                        className="gap-2"
+                      >
+                        {isSaving ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Save className="h-4 w-4" />
+                        )}
+                        Save
+                      </Button>
+                    )}
+                  </>
                 )}
               </div>
             </div>
-            
-            <div className="flex-1 flex items-center justify-center bg-muted/20">
-              {previewStatus === 'running' && previewUrl ? (
-                <div
-                  className="h-full bg-white transition-all duration-300"
-                  style={{ width: deviceSizes[previewDevice].width }}
-                >
-                  <iframe
-                    key={previewKey}
-                    ref={iframeRef}
-                    src={previewUrl}
-                    className="w-full h-full border-0"
-                    title="Preview"
-                  />
+
+            {/* Content Area */}
+            <div className="flex-1 overflow-hidden">
+              {viewMode === 'preview' ? (
+                /* Live Preview */
+                <div className="h-full flex items-center justify-center bg-muted/20">
+                  {previewStatus === 'running' && previewUrl ? (
+                    <div
+                      className="h-full bg-white transition-all duration-300"
+                      style={{ width: deviceSizes[previewDevice].width }}
+                    >
+                      <iframe
+                        key={previewKey}
+                        ref={iframeRef}
+                        src={previewUrl}
+                        className="w-full h-full border-0"
+                        title="Preview"
+                      />
+                    </div>
+                  ) : (
+                    <div className="text-center p-8">
+                      <p className="text-muted-foreground mb-4">
+                        {previewStatus === 'starting' ? 'Starting preview...' : 'Preview not running'}
+                      </p>
+                      {previewStatus !== 'starting' && (
+                        <Button onClick={startPreview}>
+                          <Play className="h-4 w-4 mr-2" />
+                          Start Preview
+                        </Button>
+                      )}
+                    </div>
+                  )}
                 </div>
               ) : (
-                <div className="text-center p-8">
-                  <p className="text-muted-foreground mb-4">
-                    {previewStatus === 'starting' ? 'Starting preview...' : 'Preview not running'}
-                  </p>
-                  {previewStatus !== 'starting' && (
-                    <Button onClick={startPreview}>
-                      <Play className="h-4 w-4 mr-2" />
-                      Start Preview
-                    </Button>
-                  )}
+                /* Code Editor with File Explorer */
+                <div className="h-full flex">
+                  {/* File Explorer Sidebar */}
+                  <div className="w-64 border-r bg-card overflow-hidden flex flex-col">
+                    <div className="p-2 border-b text-sm font-semibold text-muted-foreground">
+                      EXPLORER
+                    </div>
+                    <ScrollArea className="flex-1">
+                      <FileExplorer
+                        files={files}
+                        selectedFile={selectedFile}
+                        onFileSelect={fetchFileContent}
+                      />
+                    </ScrollArea>
+                  </div>
+
+                  {/* Editor Area */}
+                  <div className="flex-1 flex flex-col overflow-hidden">
+                    {/* Tabs */}
+                    {openTabs.length > 0 && (
+                      <div className="flex border-b bg-muted/30 overflow-x-auto">
+                        {openTabs.map((tab) => (
+                          <div
+                            key={tab.path}
+                            className={`flex items-center gap-2 px-3 py-2 border-r cursor-pointer text-sm ${
+                              activeTab === tab.path
+                                ? 'bg-background border-b-2 border-b-primary'
+                                : 'hover:bg-muted/50'
+                            }`}
+                            onClick={() => {
+                              setActiveTab(tab.path);
+                              setSelectedFile(tab.path);
+                            }}
+                          >
+                            <span className={tab.modified ? 'italic' : ''}>
+                              {tab.name}
+                              {tab.modified && ' •'}
+                            </span>
+                            <button
+                              onClick={(e) => handleTabClose(tab.path, e)}
+                              className="hover:bg-muted rounded p-0.5"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Editor Content */}
+                    <div className="flex-1 overflow-hidden">
+                      {currentTab ? (
+                        <div className="h-full flex flex-col">
+                          <div className="flex items-center justify-between p-2 border-b bg-muted/30">
+                            <span className="text-sm font-mono text-muted-foreground">
+                              {currentTab.path}
+                            </span>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleAskAIToModify(currentTab.path)}
+                              className="gap-2 text-xs"
+                            >
+                              Ask AI to modify
+                            </Button>
+                          </div>
+                          <div className="flex-1 overflow-hidden relative">
+                            <textarea
+                              ref={editorRef}
+                              value={currentTab.content}
+                              onChange={(e) => handleEditorChange(e.target.value)}
+                              className="absolute inset-0 w-full h-full p-4 font-mono text-sm bg-[#1e1e1e] text-[#d4d4d4] resize-none focus:outline-none"
+                              style={{
+                                lineHeight: '1.5',
+                                tabSize: 2,
+                              }}
+                              spellCheck={false}
+                            />
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="h-full flex items-center justify-center text-muted-foreground">
+                          <div className="text-center">
+                            <Code className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                            <p>Select a file from the explorer to edit</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
-          </div>
-        </div>
-
-        {/* Right Panel - Files & Code */}
-        <div className="border-l bg-card" style={{ width: `${rightWidth}%` }}>
-          <div className="h-full flex flex-col">
-            {!selectedFile ? (
-              <FileExplorer
-                files={files}
-                selectedFile={selectedFile}
-                onFileSelect={fetchFileContent}
-              />
-            ) : (
-              <>
-                <div className="flex-1 overflow-hidden">
-                  <CodeViewer
-                    code={fileContent}
-                    language={fileLanguage}
-                    filePath={selectedFile}
-                    onAskAI={handleAskAIToModify}
-                  />
-                </div>
-                <div className="p-2 border-t">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setSelectedFile(null)}
-                    className="w-full"
-                  >
-                    Back to Files
-                  </Button>
-                </div>
-              </>
-            )}
           </div>
         </div>
       </div>

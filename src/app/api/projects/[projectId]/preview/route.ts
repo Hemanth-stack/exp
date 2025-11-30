@@ -58,10 +58,11 @@ export async function POST(
         status: preview.status,
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error starting preview:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Failed to start preview';
     return NextResponse.json(
-      { error: error.message || 'Failed to start preview' },
+      { error: errorMessage },
       { status: 500 }
     );
   }
@@ -105,10 +106,11 @@ export async function DELETE(
       .where(eq(projects.id, projectId));
 
     return NextResponse.json({ success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error stopping preview:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Failed to stop preview';
     return NextResponse.json(
-      { error: error.message || 'Failed to stop preview' },
+      { error: errorMessage },
       { status: 500 }
     );
   }
@@ -158,10 +160,11 @@ export async function GET(
       url: status === 'running' ? `http://localhost:${preview.port}` : null,
       port: preview.port,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error getting preview status:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Failed to get preview status';
     return NextResponse.json(
-      { error: error.message || 'Failed to get preview status' },
+      { error: errorMessage },
       { status: 500 }
     );
   }

@@ -81,3 +81,59 @@ export async function GET(
     return NextResponse.json({ error: 'Failed to fetch file content' }, { status: 500 });
   }
 }
+
+export async function PUT(
+  request: NextRequest,
+  { params }: { params: Promise<{ projectId: string }> }
+) {
+  try {
+    const session = await getServerSession(authOptions);
+    if (!session?.user?.email) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const { projectId } = await params;
+    const body = await request.json();
+    const { path: filePath, content } = body;
+
+    if (!filePath) {
+      return NextResponse.json({ error: 'File path required' }, { status: 400 });
+    }
+
+    if (typeof content !== 'string') {
+      return NextResponse.json({ error: 'Content required' }, { status: 400 });
+    }
+
+    // Get user and verify project ownership
+    const [project] = await db
+      .select()
+      .from(projects)
+      .where(eq(projects.id, projectId));
+
+    if (!project || project.userId !== session.user.id) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+    }
+
+    if (!project.gitRepoPath) {
+      return NextResponse.json({ error: 'Project repository not initialized' }, { status: 400 });
+    }
+
+    // Security: ensure path doesn't escape project directory
+    const fullPath = path.join(project.gitRepoPath, filePath);
+    if (!fullPath.startsWith(project.gitRepoPath)) {
+      return NextResponse.json({ error: 'Invalid file path' }, { status: 400 });
+    }
+
+    // Write the file
+    await fs.writeFile(fullPath, content, 'utf-8');
+
+    return NextResponse.json({ 
+      success: true,
+      message: 'File saved successfully',
+      path: filePath 
+    });
+  } catch (error) {
+    console.error('Error saving file content:', error);
+    return NextResponse.json({ error: 'Failed to save file content' }, { status: 500 });
+  }
+}

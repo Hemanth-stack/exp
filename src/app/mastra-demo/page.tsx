@@ -41,8 +41,9 @@ export default function MastraAgentDemo() {
       }
       
       setResponse(result.result);
-    } catch (error: any) {
-      setResponse(`Error: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      setResponse(`Error: ${errorMessage}`);
     } finally {
       setLoading(false);
     }
@@ -179,7 +180,7 @@ export default function MastraAgentDemo() {
             <div className="text-sm">
               <div className="font-semibold text-blue-400">Generator:</div>
               <div className="text-gray-400 italic">
-                "Create a user profile card with avatar, name, bio, and social media links using Tailwind CSS"
+                &quot;Create a user profile card with avatar, name, bio, and social media links using Tailwind CSS&quot;
               </div>
             </div>
             <div className="text-sm">

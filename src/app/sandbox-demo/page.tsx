@@ -150,7 +150,15 @@ export default function DockerSandboxDemoPage() {
   const [customCode, setCustomCode] = useState('');
   const [activeCode, setActiveCode] = useState(EXAMPLE_COMPONENTS.simple);
   const [sessionId, setSessionId] = useState<string>();
-  const [dockerStatus, setDockerStatus] = useState<any>(null);
+  const [dockerStatus, setDockerStatus] = useState<{
+    available: boolean;
+    enabled: boolean;
+    error?: string;
+    containers?: number;
+    images?: number;
+    serverVersion?: string;
+    containersRunning?: number;
+  } | null>(null);
 
   // Check Docker status
   const checkDockerStatus = async () => {

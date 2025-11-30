@@ -47,9 +47,10 @@ class PreviewManager {
           await oldContainer.stop();
         }
         await oldContainer.remove();
-      } catch (err: any) {
+      } catch (err: unknown) {
         // Container doesn't exist, which is fine
-        if (err.statusCode !== 404) {
+        const dockerErr = err as { statusCode?: number };
+        if (dockerErr.statusCode !== 404) {
           console.error('Error cleaning up old container:', err);
         }
       }
@@ -159,7 +160,7 @@ class PreviewManager {
             }
             return;
           }
-        } catch (fetchError) {
+        } catch {
           // Server not ready yet, keep checking
         }
 
@@ -223,7 +224,7 @@ class PreviewManager {
       const container = docker.getContainer(previewContainer.containerId);
       const info = await container.inspect();
       return info.State.Running ? 'running' : 'stopped';
-    } catch (error) {
+    } catch {
       return 'error';
     }
   }

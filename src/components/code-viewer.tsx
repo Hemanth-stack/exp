@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { createHighlighter } from 'shiki';
+import { createHighlighter, Highlighter, BundledLanguage } from 'shiki';
 import { Button } from '@/components/ui/button';
 import { Copy, Check, Sparkles } from 'lucide-react';
 
@@ -13,7 +13,7 @@ interface CodeViewerProps {
 }
 
 export function CodeViewer({ code, language, filePath, onAskAI }: CodeViewerProps) {
-  const [highlighter, setHighlighter] = useState<any>(null);
+  const [highlighter, setHighlighter] = useState<Highlighter | null>(null);
   const [html, setHtml] = useState('');
   const [copied, setCopied] = useState(false);
 
@@ -40,7 +40,7 @@ export function CodeViewer({ code, language, filePath, onAskAI }: CodeViewerProp
     if (highlighter && code) {
       try {
         const html = highlighter.codeToHtml(code, {
-          lang: language as any,
+          lang: language as BundledLanguage,
           theme: 'github-dark',
         });
         setHtml(html);

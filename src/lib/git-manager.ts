@@ -45,7 +45,7 @@ export class GitManager {
     await fs.rm(repoPath, { recursive: true, force: true });
   }
 
-  async getLog(repoPath: string, limit: number = 10): Promise<any[]> {
+  async getLog(repoPath: string, limit: number = 10): Promise<{ hash: string; date: string; message: string; author_name: string }[]> {
     const git = simpleGit(repoPath);
     const log = await git.log({ maxCount: limit });
     return [...log.all];
@@ -59,7 +59,7 @@ export class GitManager {
     return await git.diff();
   }
 
-  async getStatus(repoPath: string): Promise<any> {
+  async getStatus(repoPath: string): Promise<{ files: { path: string; index: string; working_dir: string }[] }> {
     const git = simpleGit(repoPath);
     return await git.status();
   }

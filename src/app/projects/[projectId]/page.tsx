@@ -15,7 +15,6 @@ import {
   Wrench, 
   CheckCircle, 
   XCircle,
-  Code,
   Terminal,
   FileText,
   GitBranch,
@@ -28,17 +27,29 @@ interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
-  toolCalls?: any[];
-  toolResults?: any[];
+  toolCalls?: ToolCall[];
+  toolResults?: ToolResult[];
   createdAt: Date;
+}
+
+interface ToolResultData {
+  success?: boolean;
+  message?: string;
+  error?: string;
+  [key: string]: unknown;
+}
+
+interface ToolResult {
+  id: string;
+  result: ToolResultData;
 }
 
 interface ToolCall {
   id: string;
   name: string;
-  input: any;
+  input: Record<string, unknown>;
   status?: 'running' | 'success' | 'error';
-  result?: any;
+  result?: ToolResultData;
 }
 
 interface StreamEvent {
@@ -46,7 +57,7 @@ interface StreamEvent {
   content?: string;
   tool?: ToolCall;
   tool_use_id?: string;
-  result?: any;
+  result?: ToolResultData;
   error?: string;
   usage?: {
     input_tokens: number;
@@ -59,7 +70,13 @@ export default function ProjectPage({ params }: { params: Promise<{ projectId: s
   const { projectId } = use(params);
   const { data: session, status } = useSession();
   const router = useRouter();
-  const [project, setProject] = useState<any>(null);
+  const [project, setProject] = useState<{
+    id: string;
+    name: string;
+    description?: string;
+    framework: string;
+    status: string;
+  } | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
@@ -80,6 +97,7 @@ export default function ProjectPage({ params }: { params: Promise<{ projectId: s
     if (session) {
       fetchProject();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
   useEffect(() => {
@@ -127,7 +145,7 @@ export default function ProjectPage({ params }: { params: Promise<{ projectId: s
     try {
       abortControllerRef.current = new AbortController();
       
-      const response = await fetch(`/api/projects/${params.projectId}/chat`, {
+      const response = await fetch(`/api/projects/${projectId}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -167,8 +185,8 @@ export default function ProjectPage({ params }: { params: Promise<{ projectId: s
           }
         }
       }
-    } catch (error: any) {
-      if (error.name !== 'AbortError') {
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name !== 'AbortError') {
         console.error('Error sending message:', error);
         setCurrentMessage('Error: ' + error.message);
       }

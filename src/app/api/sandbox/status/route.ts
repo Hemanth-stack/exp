@@ -4,7 +4,7 @@
  */
 
 import { NextResponse } from 'next/server';
-import { isDockerAvailable, getDockerInfo } from '@/lib/docker-service';
+import { getDockerInfo } from '@/lib/docker-service';
 
 export async function GET() {
   try {

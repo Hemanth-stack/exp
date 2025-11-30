@@ -1,8 +1,7 @@
 import Docker from 'dockerode';
 import { db } from '@/db';
 import { projects } from '@/db/schema';
-import { eq, isNull } from 'drizzle-orm';
-import path from 'path';
+import { isNotNull } from 'drizzle-orm';
 
 const docker = new Docker();
 
@@ -14,7 +13,7 @@ export class ContainerManager {
     const allocatedPorts = await db
       .select({ containerPort: projects.containerPort })
       .from(projects)
-      .where(isNull(projects.containerId).not());
+      .where(isNotNull(projects.containerId));
 
     const usedPorts = new Set(
       allocatedPorts
@@ -68,8 +67,8 @@ export class ContainerManager {
       const container = docker.getContainer(containerId);
       await container.stop();
       await container.remove();
-    } catch (error) {
-      console.error('Error stopping container:', error);
+    } catch {
+      console.error('Error stopping container');
     }
   }
 
@@ -78,7 +77,7 @@ export class ContainerManager {
       const container = docker.getContainer(containerId);
       const info = await container.inspect();
       return info.State.Status;
-    } catch (error) {
+    } catch {
       return 'not_found';
     }
   }
@@ -92,7 +91,7 @@ export class ContainerManager {
         tail: 100,
       });
       return logs.toString();
-    } catch (error) {
+    } catch {
       return 'Error fetching logs';
     }
   }

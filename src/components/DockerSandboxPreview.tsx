@@ -92,6 +92,7 @@ export function DockerSandboxPreview({
       addLog(`Error: ${errorMessage}`);
       onError?.(errorMessage);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code, initialSessionId, onSessionIdChange, onError, addLog]);
 
   /**

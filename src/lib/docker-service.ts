@@ -98,7 +98,7 @@ async function ensureBaseImage(): Promise<void> {
   try {
     await docker.getImage(SANDBOX_BASE_IMAGE).inspect();
     console.log(`[Docker Service] Base image ${SANDBOX_BASE_IMAGE} is available`);
-  } catch (error) {
+  } catch {
     console.log(`[Docker Service] Base image not found, building ${SANDBOX_BASE_IMAGE}...`);
     
     // Build the image from Dockerfile.sandbox
@@ -301,8 +301,9 @@ export async function destroySandbox(sessionId: string): Promise<void> {
     try {
       await container.stop({ t: 10 });
       console.log(`[Docker Service] Stopped container ${sessionId}`);
-    } catch (error: any) {
-      if (error.statusCode !== 304) { // 304 = already stopped
+    } catch (error: unknown) {
+      const dockerError = error as { statusCode?: number };
+      if (dockerError.statusCode !== 304) { // 304 = already stopped
         throw error;
       }
     }
@@ -316,8 +317,8 @@ export async function destroySandbox(sessionId: string): Promise<void> {
     try {
       await fs.rm(sessionDir, { recursive: true, force: true });
       console.log(`[Docker Service] Cleaned up files for ${sessionId}`);
-    } catch (error) {
-      console.warn(`[Docker Service] Failed to cleanup files for ${sessionId}:`, error);
+    } catch {
+      console.warn(`[Docker Service] Failed to cleanup files for ${sessionId}`);
     }
     
     // Remove from active sandboxes
@@ -348,7 +349,7 @@ export async function listActiveSandboxes(): Promise<SandboxInfo[]> {
       } else {
         sandbox.status = 'unhealthy';
       }
-    } catch (error) {
+    } catch {
       sandbox.status = 'stopped';
     }
   }

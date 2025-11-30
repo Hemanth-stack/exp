@@ -8,8 +8,6 @@ import { codeGeneratorAgent, debugAgent, analyzerAgent, improveAgent } from '@/m
 import fs from 'fs/promises';
 import path from 'path';
 
-const MAX_TOKENS = 8192;
-
 // Detect intent from message
 function detectIntent(message: string): {
   type: 'generate' | 'debug' | 'analyze' | 'improve' | 'general';
@@ -85,7 +83,7 @@ function parseComponent(response: string): {
         filePath: `app/components/${name}.tsx`,
       };
     }
-  } catch (e) {
+  } catch {
     console.log('⚠️  JSON parsing failed, trying markdown extraction');
   }
   
@@ -236,22 +234,19 @@ export async function POST(
             )
           );
 
-          // Build conversation history
-          const conversationHistory = history
+          // Build conversation history as strings for the agent
+          const conversationContext = history
             .reverse()
-            .map(msg => ({
-              role: msg.role as 'user' | 'assistant',
-              content: msg.content,
-            }));
+            .map(msg => `${msg.role}: ${msg.content}`)
+            .join('\n\n');
 
-          // Add current message
-          conversationHistory.push({
-            role: 'user',
-            content: userMessage,
-          });
+          // Create the prompt with context
+          const fullPrompt = conversationContext 
+            ? `Previous conversation:\n${conversationContext}\n\nUser: ${userMessage}`
+            : userMessage;
 
           // Execute agent
-          const response = await agent.generate(conversationHistory);
+          const response = await agent.generate(fullPrompt);
           
           const assistantResponse = response.text || '';
 
@@ -266,16 +261,16 @@ export async function POST(
           );
 
           // Try to create files if it's a generation request
-          let createdFiles: string[] = [];
-          if (intent.type === 'generate') {
+          const createdFiles: string[] = [];
+          if (intent.type === 'generate' && project.gitRepoPath) {
             console.log('📁 Attempting to create files for generation request...');
             const component = parseComponent(assistantResponse);
             
             if (component) {
               console.log('✅ Component parsed successfully:', component.name);
               try {
-                // Create project directory structure
-                const projectPath = path.join(process.cwd(), 'user-repos', projectId);
+                // Use the project's actual git repo path
+                const projectPath = project.gitRepoPath;
                 const componentDir = path.join(projectPath, 'app', 'components');
                 
                 console.log('📂 Creating directory:', componentDir);
@@ -331,6 +326,19 @@ export default function PreviewPage() {
 `;
                 await fs.writeFile(previewPath, previewCode, 'utf-8');
 
+                // Also update the main page.tsx to render the component
+                const mainPagePath = path.join(projectPath, 'app', 'page.tsx');
+                const mainPageCode = `'use client';
+
+import ${component.name} from './components/${component.name}';
+
+export default function Home() {
+  return <${component.name} />;
+}
+`;
+                await fs.writeFile(mainPagePath, mainPageCode, 'utf-8');
+                console.log('✅ Main page updated to use:', component.name);
+
                 // Send preview link
                 controller.enqueue(
                   encoder.encode(
@@ -341,7 +349,7 @@ export default function PreviewPage() {
                     })}\n\n`
                   )
                 );
-              } catch (fileError: any) {
+              } catch (fileError: unknown) {
                 console.error('File creation error:', fileError);
                 controller.enqueue(
                   encoder.encode(
@@ -375,13 +383,14 @@ export default function PreviewPage() {
           );
 
           controller.close();
-        } catch (error: any) {
+        } catch (error: unknown) {
           console.error('Chat error:', error);
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
           controller.enqueue(
             encoder.encode(
               `data: ${JSON.stringify({
                 type: 'error',
-                error: error.message,
+                error: errorMessage,
               })}\n\n`
             )
           );
@@ -397,10 +406,11 @@ export default function PreviewPage() {
         'Connection': 'keep-alive',
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Chat API error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Internal server error';
     return NextResponse.json(
-      { error: error.message || 'Internal server error' },
+      { error: errorMessage },
       { status: 500 }
     );
   }
@@ -438,7 +448,7 @@ export async function GET(
       .orderBy(messages.createdAt);
 
     return NextResponse.json({ messages: msgs });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Get messages error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },

@@ -8,6 +8,7 @@ import { anthropic } from '@ai-sdk/anthropic';
 import { streamText } from 'ai';
 import fs from 'fs/promises';
 import path from 'path';
+import { gitManager } from '@/lib/git-manager';
 import { 
   getProjectContext, 
   getFileContext,
@@ -881,6 +882,40 @@ export async function POST(
                 message: `Saved ${successCount} file(s) successfully`,
                 icon: '💾'
               });
+
+              // Auto-commit the changes
+              try {
+                sendStep(controller, {
+                  type: 'step',
+                  step: 'committing',
+                  status: 'start',
+                  message: 'Committing changes to git...',
+                  icon: '📝'
+                });
+
+                const commitMessage = `AI: ${createdFiles.length === 1 
+                  ? `Updated ${createdFiles[0]}` 
+                  : `Updated ${createdFiles.length} files`}`;
+                await gitManager.commit(projectPath, commitMessage);
+
+                sendStep(controller, {
+                  type: 'step',
+                  step: 'committing',
+                  status: 'complete',
+                  message: 'Changes committed successfully',
+                  icon: '✅'
+                });
+              } catch (commitErr) {
+                console.error('Auto-commit error:', commitErr);
+                sendStep(controller, {
+                  type: 'step',
+                  step: 'committing',
+                  status: 'error',
+                  message: 'Failed to commit changes (files still saved)',
+                  details: commitErr instanceof Error ? commitErr.message : 'Unknown error',
+                  icon: '⚠️'
+                });
+              }
 
             } else {
               sendStep(controller, {

@@ -6,6 +6,7 @@ import { projects } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import fs from 'fs/promises';
 import path from 'path';
+import { gitManager } from '@/lib/git-manager';
 
 export async function GET(
   request: NextRequest,
@@ -126,6 +127,15 @@ export async function PUT(
 
     // Write the file
     await fs.writeFile(fullPath, content, 'utf-8');
+
+    // Auto-commit the changes
+    try {
+      const commitMessage = `Updated file: ${filePath}`;
+      await gitManager.commit(project.gitRepoPath, commitMessage);
+    } catch (commitErr) {
+      console.error('Auto-commit error:', commitErr);
+      // Don't fail the request if commit fails
+    }
 
     return NextResponse.json({ 
       success: true,

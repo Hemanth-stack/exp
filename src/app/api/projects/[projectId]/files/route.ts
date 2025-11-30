@@ -6,6 +6,7 @@ import { projects } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import fs from 'fs/promises';
 import path from 'path';
+import { gitManager } from '@/lib/git-manager';
 
 interface FileNode {
   name: string;
@@ -139,6 +140,17 @@ export async function POST(
       await fs.writeFile(fullPath, content || '');
     }
 
+    // Auto-commit the changes
+    try {
+      const commitMessage = type === 'directory' 
+        ? `Created directory: ${relativePath}` 
+        : `Created file: ${relativePath}`;
+      await gitManager.commit(project.gitRepoPath, commitMessage);
+    } catch (commitErr) {
+      console.error('Auto-commit error:', commitErr);
+      // Don't fail the request if commit fails
+    }
+
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Error creating file:', error);
@@ -183,6 +195,15 @@ export async function PUT(
     }
 
     await fs.rename(fullOldPath, fullNewPath);
+
+    // Auto-commit the rename
+    try {
+      const commitMessage = `Renamed: ${oldPath} → ${newPath}`;
+      await gitManager.commit(project.gitRepoPath, commitMessage);
+    } catch (commitErr) {
+      console.error('Auto-commit error:', commitErr);
+      // Don't fail the request if commit fails
+    }
 
     return NextResponse.json({ success: true });
   } catch (error) {
@@ -234,6 +255,17 @@ export async function DELETE(
       await fs.rm(fullPath, { recursive: true });
     } else {
       await fs.unlink(fullPath);
+    }
+
+    // Auto-commit the deletion
+    try {
+      const commitMessage = stat.isDirectory() 
+        ? `Deleted directory: ${filePath}` 
+        : `Deleted file: ${filePath}`;
+      await gitManager.commit(project.gitRepoPath, commitMessage);
+    } catch (commitErr) {
+      console.error('Auto-commit error:', commitErr);
+      // Don't fail the request if commit fails
     }
 
     return NextResponse.json({ success: true });

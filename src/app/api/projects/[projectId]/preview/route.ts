@@ -4,7 +4,7 @@ import { authOptions } from '@/lib/auth-config';
 import { db } from '@/db';
 import { projects } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
-import { previewManager } from '@/lib/preview-manager';
+import { previewManager, ContainerLimitError } from '@/lib/preview-manager';
 
 export async function POST(
   request: Request,
@@ -38,8 +38,8 @@ export async function POST(
       return NextResponse.json({ error: 'Project repository not found' }, { status: 404 });
     }
 
-    // Start preview
-    const preview = await previewManager.startPreview(projectId, project.gitRepoPath);
+    // Start preview with userId for container limits
+    const preview = await previewManager.startPreview(projectId, project.gitRepoPath, session.user.id);
 
     // Update project status
     await db
@@ -60,6 +60,21 @@ export async function POST(
     });
   } catch (error: unknown) {
     console.error('Error starting preview:', error);
+    
+    // Check for container limit error
+    if ((error as ContainerLimitError).code === 'CONTAINER_LIMIT_EXCEEDED') {
+      const limitError = error as ContainerLimitError;
+      return NextResponse.json(
+        { 
+          error: 'Container limit reached',
+          message: limitError.message,
+          currentCount: limitError.currentCount,
+          maxAllowed: limitError.maxAllowed,
+        },
+        { status: 429 } // Too Many Requests
+      );
+    }
+    
     const errorMessage = error instanceof Error ? error.message : 'Failed to start preview';
     return NextResponse.json(
       { error: errorMessage },
@@ -144,7 +159,7 @@ export async function GET(
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     }
 
-    const preview = previewManager.getPreview(projectId);
+    const preview = await previewManager.getPreview(projectId);
     
     if (!preview) {
       return NextResponse.json({ 

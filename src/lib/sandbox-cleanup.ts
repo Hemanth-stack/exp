@@ -4,6 +4,7 @@
  */
 
 import { cleanupIdleSandboxes } from './docker-service';
+import { previewManager } from './preview-manager';
 
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const SANDBOX_TIMEOUT_MINUTES = parseInt(
@@ -63,11 +64,16 @@ async function runCleanup() {
     const timestamp = new Date().toISOString();
     console.log(`[Cleanup Service] Running cleanup at ${timestamp}`);
 
-    const cleanedCount = await cleanupIdleSandboxes(SANDBOX_TIMEOUT_MINUTES);
+    // Clean up idle sandboxes
+    const sandboxCleanedCount = await cleanupIdleSandboxes(SANDBOX_TIMEOUT_MINUTES);
+    
+    // Clean up idle preview containers
+    const previewCleanedCount = await previewManager.cleanupIdleContainers();
 
-    if (cleanedCount > 0) {
+    const totalCleaned = sandboxCleanedCount + previewCleanedCount;
+    if (totalCleaned > 0) {
       console.log(
-        `[Cleanup Service] Cleaned up ${cleanedCount} idle sandbox(es)`
+        `[Cleanup Service] Cleaned up ${sandboxCleanedCount} sandbox(es) and ${previewCleanedCount} preview container(s)`
       );
     }
   } catch (error) {

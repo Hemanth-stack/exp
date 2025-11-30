@@ -54,12 +54,84 @@ async function ensureSandboxDir() {
 }
 
 /**
+ * Get all ports currently in use by Docker sandbox containers
+ */
+async function getDockerSandboxPorts(): Promise<Set<number>> {
+  const usedPorts = new Set<number>();
+  try {
+    const containers = await docker.listContainers({ all: true });
+    for (const container of containers) {
+      // Only check sandbox containers
+      const containerName = container.Names?.[0]?.replace('/', '') || '';
+      if (containerName.startsWith('sandbox-')) {
+        for (const port of container.Ports || []) {
+          if (port.PublicPort) {
+            usedPorts.add(port.PublicPort);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Docker Service] Error getting sandbox ports:', err);
+  }
+  return usedPorts;
+}
+
+/**
+ * Sync in-memory state with actual Docker containers
+ */
+async function syncWithDocker(): Promise<void> {
+  try {
+    const containers = await docker.listContainers({ all: true });
+    for (const containerInfo of containers) {
+      const containerName = containerInfo.Names?.[0]?.replace('/', '') || '';
+      if (containerName.startsWith('sandbox-')) {
+        const sessionId = containerName.replace('sandbox-', '');
+        
+        // Find the port
+        let port = 0;
+        for (const p of containerInfo.Ports || []) {
+          if (p.PublicPort) {
+            port = p.PublicPort;
+            break;
+          }
+        }
+        
+        if (port && !activeSandboxes.has(sessionId)) {
+          // Restore sandbox info to in-memory state
+          activeSandboxes.set(sessionId, {
+            containerId: containerInfo.Id,
+            sessionId,
+            port,
+            previewUrl: `http://localhost:${port}`,
+            status: containerInfo.State === 'running' ? 'healthy' : 'stopped',
+            createdAt: new Date(containerInfo.Created * 1000),
+            lastAccessedAt: new Date(),
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Docker Service] Error syncing with Docker:', err);
+  }
+}
+
+/**
  * Find an available port for the sandbox
+ * Checks both in-memory state AND actual Docker containers
  */
 async function findAvailablePort(): Promise<number> {
-  const usedPorts = new Set(
-    Array.from(activeSandboxes.values()).map(s => s.port)
-  );
+  // Sync with Docker first
+  await syncWithDocker();
+  
+  // Get ports from Docker
+  const dockerPorts = await getDockerSandboxPorts();
+  
+  // Combine in-memory and Docker ports
+  const usedPorts = new Set([
+    ...Array.from(activeSandboxes.values()).map(s => s.port),
+    ...dockerPorts
+  ]);
 
   for (let port = PORT_START; port <= PORT_END; port++) {
     if (!usedPorts.has(port)) {

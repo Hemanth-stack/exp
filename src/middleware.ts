@@ -10,5 +10,12 @@ export default withAuth({
 });
 
 export const config = {
-  matcher: ['/dashboard/:path*', '/settings/:path*', '/api/projects/:path*'],
+  matcher: [
+    '/dashboard/:path*', 
+    '/settings/:path*', 
+    '/builder/:path*',
+    '/api/projects/:path*',
+    '/api/sandbox/:path*',
+    '/api/containers/:path*',
+  ],
 };

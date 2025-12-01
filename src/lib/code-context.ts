@@ -85,7 +85,7 @@ async function getAllFiles(
 async function generateProjectTree(
   dir: string,
   prefix: string = '',
-  isLast: boolean = true
+  _isLast: boolean = true
 ): Promise<string> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   const lines: string[] = [];
@@ -147,7 +147,7 @@ function extractImports(content: string): string[] {
 function findRelatedFiles(
   targetFile: string,
   allFiles: FileContext[],
-  depth: number = 1
+  _depth: number = 1
 ): string[] {
   const target = allFiles.find(f => f.path === targetFile);
   if (!target) return [];

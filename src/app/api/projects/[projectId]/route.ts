@@ -7,6 +7,7 @@ import { eq, and } from 'drizzle-orm';
 import { z } from 'zod';
 import fs from 'fs/promises';
 import { normalizeRepoPath } from '@/lib/git-manager';
+import { previewManager } from '@/lib/preview-manager';
 
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(255).optional(),
@@ -137,6 +138,15 @@ export async function DELETE(
 
     if (!existingProject) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+    }
+
+    // Stop any running preview container first
+    try {
+      await previewManager.stopPreview(projectId);
+      console.log(`[Projects API] Stopped preview for project ${projectId}`);
+    } catch {
+      // Log but don't fail deletion if container doesn't exist
+      console.log(`[Projects API] No running preview to stop for project ${projectId}`);
     }
 
     // Delete conversations and messages first (cascade)

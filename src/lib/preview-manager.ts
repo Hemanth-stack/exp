@@ -11,8 +11,22 @@ import { getRedisClient, REDIS_KEYS, CONTAINER_LIMITS } from './redis';
 const docker = new Docker();
 
 // Host path for user-repos volume binding (Docker-in-Docker requires host paths)
-// Set via environment variable or default to a common path
-const HOST_USER_REPOS_PATH = process.env.HOST_USER_REPOS_PATH || '/Users/hemanthirivichetty/Desktop/low_code_platform/exp/user-repos';
+// Lazy initialization to avoid errors during build
+let _hostUserReposPath: string | null = null;
+
+function getHostUserReposPath(): string {
+  if (_hostUserReposPath) return _hostUserReposPath;
+  
+  if (process.env.HOST_USER_REPOS_PATH) {
+    _hostUserReposPath = process.env.HOST_USER_REPOS_PATH;
+  } else if (process.env.NODE_ENV === 'production') {
+    throw new Error('HOST_USER_REPOS_PATH environment variable is required in production');
+  } else {
+    _hostUserReposPath = path.join(process.cwd(), 'user-repos');
+  }
+  
+  return _hostUserReposPath;
+}
 
 /**
  * Convert container path to host path for Docker-in-Docker volume mounting
@@ -22,7 +36,7 @@ function getHostPath(containerPath: string): string {
   // If running in production (Docker) and path starts with /app/user-repos
   if (process.env.NODE_ENV === 'production' && containerPath.startsWith('/app/user-repos')) {
     const relativePath = containerPath.replace('/app/user-repos', '');
-    return path.join(HOST_USER_REPOS_PATH, relativePath);
+    return path.join(getHostUserReposPath(), relativePath);
   }
   return containerPath;
 }

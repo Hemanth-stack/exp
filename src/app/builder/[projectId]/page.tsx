@@ -4,7 +4,6 @@ import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, useRef, use } from 'react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useToast } from '@/components/ui/use-toast';
 import { FileExplorer } from '@/components/file-explorer';
@@ -29,7 +28,6 @@ import {
   RotateCcw,
   Github,
   GitBranch,
-  ChevronDown,
   ChevronUp,
   RefreshCcw,
 } from 'lucide-react';
@@ -561,6 +559,7 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, openTabs]);
 
   const checkPreviewStatus = async () => {
@@ -870,7 +869,7 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
     }
   };
 
-  // Function to include multiple files for context
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const handleAskAIWithContext = () => {
     const contextFiles = openTabs
       .filter(tab => tab.content)

@@ -7,12 +7,93 @@ import { eq } from 'drizzle-orm';
 import fs from 'fs/promises';
 import path from 'path';
 import { gitManager, normalizeRepoPath } from '@/lib/git-manager';
+import { checkRateLimit, createRateLimitHeaders, getRateLimitIdentifier, RATE_LIMITS } from '@/lib/rate-limit';
 
 interface FileNode {
   name: string;
   path: string;
   type: 'file' | 'directory';
   children?: FileNode[];
+}
+
+// Maximum file size for writes (5MB)
+const MAX_FILE_SIZE = 5 * 1024 * 1024;
+
+// Allowed file extensions for creation/modification
+const ALLOWED_EXTENSIONS = new Set([
+  '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs',
+  '.json', '.md', '.txt', '.html', '.css', '.scss', '.less',
+  '.vue', '.svelte', '.astro',
+  '.py', '.rb', '.go', '.rs', '.java', '.kt', '.scala',
+  '.yaml', '.yml', '.toml', '.ini', '.env', '.env.local', '.env.example',
+  '.sh', '.bash', '.zsh',
+  '.svg', '.xml',
+  '.gitignore', '.npmrc', '.nvmrc', '.prettierrc', '.eslintrc',
+  '', // Files without extension like Dockerfile, Makefile
+]);
+
+// Validate project ID format (UUID)
+function isValidProjectId(projectId: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId);
+}
+
+// Validate file path - prevent path traversal and dangerous patterns
+function isValidFilePath(filePath: string): boolean {
+  // Must not be empty
+  if (!filePath || typeof filePath !== 'string') {
+    return false;
+  }
+  
+  // Must not contain null bytes
+  if (filePath.includes('\0')) {
+    return false;
+  }
+  
+  // Must not contain path traversal
+  const normalized = path.normalize(filePath);
+  if (normalized.includes('..') || normalized.startsWith('/') || normalized.startsWith('\\')) {
+    return false;
+  }
+  
+  // Must not contain dangerous patterns
+  const dangerousPatterns = [
+    /node_modules/i,
+    /\.git\//i,
+    /\.git$/i,
+    /\.env(?!\.example)/i, // Allow .env.example but not .env, .env.local, etc.
+    /\.pem$/i,
+    /\.key$/i,
+    /id_rsa/i,
+    /password/i,
+    /secret/i,
+  ];
+  
+  for (const pattern of dangerousPatterns) {
+    if (pattern.test(filePath)) {
+      return false;
+    }
+  }
+  
+  // Check file extension
+  const ext = path.extname(filePath).toLowerCase();
+  
+  // Allow files without extension (like Dockerfile, Makefile)
+  if (!ext && !ALLOWED_EXTENSIONS.has('')) {
+    return false;
+  }
+  
+  // Check if extension is allowed
+  if (ext && !ALLOWED_EXTENSIONS.has(ext)) {
+    return false;
+  }
+  
+  return true;
+}
+
+// Sanitize file content to prevent injection attacks
+function sanitizeContent(content: string): string {
+  // Remove null bytes
+  return content.replace(/\0/g, '');
 }
 
 async function buildFileTree(dirPath: string, basePath: string = ''): Promise<FileNode[]> {
@@ -75,6 +156,17 @@ export async function GET(
 
     const { projectId } = await params;
 
+    // Rate limiting
+    const identifier = getRateLimitIdentifier(session.user.id);
+    const rateLimit = checkRateLimit(identifier, RATE_LIMITS.files);
+    if (!rateLimit.allowed) {
+      return NextResponse.json({ error: 'Too many requests' }, { status: 429, headers: createRateLimitHeaders(rateLimit) });
+    }
+
+    if (!isValidProjectId(projectId)) {
+      return NextResponse.json({ error: 'Invalid project ID' }, { status: 400 });
+    }
+
     // Get user and verify project ownership
     const [project] = await db
       .select()
@@ -114,6 +206,21 @@ export async function POST(
     const body = await request.json();
     const { filePath: relativePath, content, type } = body;
 
+    // Rate limiting
+    const identifier = getRateLimitIdentifier(session.user.id);
+    const rateLimit = checkRateLimit(identifier, RATE_LIMITS.files);
+    if (!rateLimit.allowed) {
+      return NextResponse.json({ error: 'Too many requests' }, { status: 429, headers: createRateLimitHeaders(rateLimit) });
+    }
+
+    if (!isValidProjectId(projectId)) {
+      return NextResponse.json({ error: 'Invalid project ID' }, { status: 400 });
+    }
+
+    if (!isValidFilePath(relativePath)) {
+      return NextResponse.json({ error: 'Invalid file path' }, { status: 400 });
+    }
+
     // Get user and verify project ownership
     const [project] = await db
       .select()
@@ -137,12 +244,18 @@ export async function POST(
       return NextResponse.json({ error: 'Invalid file path' }, { status: 400 });
     }
 
+    // Check file size
+    const contentSize = Buffer.byteLength(content, 'utf8');
+    if (contentSize > MAX_FILE_SIZE) {
+      return NextResponse.json({ error: 'File size exceeds limit' }, { status: 400 });
+    }
+
     if (type === 'directory') {
       await fs.mkdir(fullPath, { recursive: true });
     } else {
       // Ensure directory exists
       await fs.mkdir(path.dirname(fullPath), { recursive: true });
-      await fs.writeFile(fullPath, content || '');
+      await fs.writeFile(fullPath, sanitizeContent(content) || '');
     }
 
     // Auto-commit the changes
@@ -176,6 +289,21 @@ export async function PUT(
     const { projectId } = await params;
     const body = await request.json();
     const { oldPath, newPath } = body;
+
+    // Rate limiting
+    const identifier = getRateLimitIdentifier(session.user.id);
+    const rateLimit = checkRateLimit(identifier, RATE_LIMITS.files);
+    if (!rateLimit.allowed) {
+      return NextResponse.json({ error: 'Too many requests' }, { status: 429, headers: createRateLimitHeaders(rateLimit) });
+    }
+
+    if (!isValidProjectId(projectId)) {
+      return NextResponse.json({ error: 'Invalid project ID' }, { status: 400 });
+    }
+
+    if (!isValidFilePath(oldPath) || !isValidFilePath(newPath)) {
+      return NextResponse.json({ error: 'Invalid file path' }, { status: 400 });
+    }
 
     // Get user and verify project ownership
     const [project] = await db
@@ -234,8 +362,23 @@ export async function DELETE(
     const { searchParams } = new URL(request.url);
     const filePath = searchParams.get('path');
 
+    // Rate limiting
+    const identifier = getRateLimitIdentifier(session.user.id);
+    const rateLimit = checkRateLimit(identifier, RATE_LIMITS.files);
+    if (!rateLimit.allowed) {
+      return NextResponse.json({ error: 'Too many requests' }, { status: 429, headers: createRateLimitHeaders(rateLimit) });
+    }
+
     if (!filePath) {
       return NextResponse.json({ error: 'File path required' }, { status: 400 });
+    }
+
+    if (!isValidProjectId(projectId)) {
+      return NextResponse.json({ error: 'Invalid project ID' }, { status: 400 });
+    }
+
+    if (!isValidFilePath(filePath)) {
+      return NextResponse.json({ error: 'Invalid file path' }, { status: 400 });
     }
 
     // Get user and verify project ownership

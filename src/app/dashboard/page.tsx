@@ -184,6 +184,7 @@ export default function DashboardPage() {
     if (status === 'authenticated') {
       fetchProjects();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, router]);
 
   // Debounced GitHub URL validation
@@ -199,6 +200,7 @@ export default function DashboardPage() {
     }, 500);
 
     return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [githubUrl, createMode]);
 
   const validateGitHubUrl = async (url: string) => {

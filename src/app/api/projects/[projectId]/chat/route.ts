@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-config';
 import { db } from '@/db';
@@ -15,6 +15,7 @@ import {
   formatContextForPrompt,
   formatFileContextForModification 
 } from '@/lib/code-context';
+import { checkRateLimit, createRateLimitHeaders, getRateLimitIdentifier, RATE_LIMITS } from '@/lib/rate-limit';
 
 // Detect intent from message
 function detectIntent(message: string): {
@@ -431,7 +432,7 @@ Provide specific recommendations with code examples.${contextNote}`;
 }
 
 export async function POST(
-  request: Request,
+  request: NextRequest,
   { params }: { params: Promise<{ projectId: string }> }
 ) {
   try {
@@ -440,11 +441,37 @@ export async function POST(
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    // Rate limiting for AI endpoint (stricter limits)
+    const identifier = getRateLimitIdentifier(session.user.id);
+    const rateLimitResult = checkRateLimit(identifier, RATE_LIMITS.ai);
+    
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { error: 'Too many requests. Please wait before sending more messages.' },
+        { 
+          status: 429,
+          headers: createRateLimitHeaders(rateLimitResult)
+        }
+      );
+    }
+
     const { projectId } = await params;
+
+    // Validate projectId format (UUID)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(projectId)) {
+      return NextResponse.json({ error: 'Invalid project ID' }, { status: 400 });
+    }
+
     const { message: userMessage, conversationId } = await request.json();
 
     if (!userMessage) {
       return NextResponse.json({ error: 'Message required' }, { status: 400 });
+    }
+
+    // Validate message length (prevent abuse)
+    if (typeof userMessage !== 'string' || userMessage.length > 50000) {
+      return NextResponse.json({ error: 'Message too long (max 50,000 characters)' }, { status: 400 });
     }
 
     // Get project info

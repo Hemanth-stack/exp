@@ -8,6 +8,50 @@ const REPOS_DIR = process.env.NODE_ENV === 'production'
   : path.join(process.cwd(), 'user-repos');
 
 /**
+ * Validates that a repository path is safe and within allowed directories
+ * Prevents path traversal attacks
+ */
+export function validateRepoPath(repoPath: string): boolean {
+  // Normalize the path to resolve any .. or . components
+  const normalizedPath = path.normalize(repoPath);
+  
+  // Check for path traversal attempts
+  if (normalizedPath.includes('..')) {
+    return false;
+  }
+  
+  // Define allowed base directories
+  const allowedBases = [
+    '/app/user-repos',
+    path.join(process.cwd(), 'user-repos'),
+  ];
+  
+  // Check if path starts with an allowed base
+  const isWithinAllowed = allowedBases.some(base => 
+    normalizedPath.startsWith(path.normalize(base))
+  );
+  
+  if (!isWithinAllowed) {
+    return false;
+  }
+  
+  // Additional security: ensure path doesn't contain suspicious patterns
+  const suspiciousPatterns = [
+    /\0/,           // Null bytes
+    /[<>:"|?*]/,    // Windows-restricted characters
+    /\/\//,         // Double slashes
+  ];
+  
+  for (const pattern of suspiciousPatterns) {
+    if (pattern.test(repoPath)) {
+      return false;
+    }
+  }
+  
+  return true;
+}
+
+/**
  * Normalizes a repository path for the current environment
  * Handles both host paths and container paths
  */

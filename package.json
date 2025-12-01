@@ -38,6 +38,7 @@
     "chokidar": "^5.0.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.0.0",
+    "date-fns": "^3.6.0",
     "dockerode": "^4.0.2",
     "drizzle-orm": "^0.29.1",
     "lucide-react": "^0.294.0",

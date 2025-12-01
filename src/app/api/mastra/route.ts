@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth-config';
 import { 
   codeGeneratorAgent, 
   debugAgent, 
@@ -11,6 +13,12 @@ import {
   deployAgent,
   codeReviewAgent,
 } from '@/mastra';
+import {
+  checkRateLimit,
+  createRateLimitHeaders,
+  getRateLimitIdentifier,
+  RATE_LIMITS,
+} from '@/lib/rate-limit';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -210,6 +218,29 @@ function buildContextualPrompt(
 
 export async function POST(request: NextRequest) {
   try {
+    // Get session for rate limiting
+    const session = await getServerSession(authOptions);
+    
+    // Apply rate limiting
+    const identifier = getRateLimitIdentifier(
+      session?.user?.id,
+      request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip')
+    );
+    const rateLimitResult = checkRateLimit(identifier, RATE_LIMITS.ai);
+    
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { 
+          error: 'Rate limit exceeded',
+          message: `Too many AI requests. Please try again in ${rateLimitResult.retryAfterSeconds} seconds.`,
+        },
+        { 
+          status: 429,
+          headers: createRateLimitHeaders(rateLimitResult),
+        }
+      );
+    }
+
     const body: MastraRequest = await request.json();
     const { 
       prompt, 

@@ -5,6 +5,7 @@
 
 import { startCleanupService } from './sandbox-cleanup';
 import { isDockerAvailable, getDockerInfo } from './docker-service';
+import { validateEnvOrThrow } from './env-validation';
 
 let initialized = false;
 
@@ -19,6 +20,16 @@ export async function initializeSandboxSystem() {
   }
 
   console.log('[Sandbox System] Initializing...');
+
+  // Validate environment variables first
+  try {
+    validateEnvOrThrow();
+  } catch (error) {
+    console.error('[Sandbox System] Environment validation failed:', error);
+    if (process.env.NODE_ENV === 'production') {
+      throw error;
+    }
+  }
 
   // Check if Docker is enabled
   const dockerEnabled = process.env.DOCKER_ENABLED === 'true';

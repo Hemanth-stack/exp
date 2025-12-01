@@ -45,7 +45,7 @@ export default function SandboxPage({
   params: Promise<{ projectId: string }> 
 }) {
   const { projectId } = use(params);
-  const { data: session, status: authStatus } = useSession();
+  const { status: authStatus } = useSession();
   const router = useRouter();
   const { toast } = useToast();
   

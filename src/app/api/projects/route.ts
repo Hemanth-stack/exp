@@ -1,27 +1,31 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-config';
 import { db } from '@/db';
 import { projects, users } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { gitManager, parseGitHubUrl, validateGitHubRepo } from '@/lib/git-manager';
+import { gitManager, parseGitHubUrl, validateGitHubRepo, validateRepoPath } from '@/lib/git-manager';
 import { createGitHubService } from '@/lib/github-service';
 import { previewManager } from '@/lib/preview-manager';
+import { checkRateLimit, createRateLimitHeaders, getRateLimitIdentifier, RATE_LIMITS, RateLimitResult } from '@/lib/rate-limit';
 
 // Schema for creating a project from template
 const createFromTemplateSchema = z.object({
-  name: z.string().min(1).max(255),
-  description: z.string().optional(),
+  name: z.string().min(1).max(255).regex(/^[a-zA-Z0-9\s\-_]+$/, 'Project name can only contain letters, numbers, spaces, hyphens, and underscores'),
+  description: z.string().max(1000).optional(),
   template: z.enum(['nextjs', 'vite-react']),
   source: z.literal('template').optional(),
 });
 
 // Schema for importing from GitHub
 const importFromGitHubSchema = z.object({
-  name: z.string().min(1).max(255),
-  description: z.string().optional(),
-  githubUrl: z.string().url(),
+  name: z.string().min(1).max(255).regex(/^[a-zA-Z0-9\s\-_]+$/, 'Project name can only contain letters, numbers, spaces, hyphens, and underscores'),
+  description: z.string().max(1000).optional(),
+  githubUrl: z.string().url().refine(
+    (url) => url.startsWith('https://github.com/'),
+    'Only GitHub URLs are supported'
+  ),
   source: z.literal('github'),
   autoStartPreview: z.boolean().optional(),
 });
@@ -32,7 +36,7 @@ const createProjectSchema = z.discriminatedUnion('source', [
   importFromGitHubSchema,
 ]).or(createFromTemplateSchema); // Support legacy format without source field
 
-export async function GET() {
+export async function GET(_request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
 
@@ -40,12 +44,28 @@ export async function GET() {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    // Rate limiting
+    const identifier = getRateLimitIdentifier(session.user.id);
+    const rateLimitResult = checkRateLimit(identifier, RATE_LIMITS.api);
+    
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { error: 'Too many requests. Please try again later.' },
+        { 
+          status: 429,
+          headers: createRateLimitHeaders(rateLimitResult)
+        }
+      );
+    }
+
     const userProjects = await db
       .select()
       .from(projects)
       .where(eq(projects.userId, session.user.id));
 
-    return NextResponse.json(userProjects);
+    return NextResponse.json(userProjects, {
+      headers: createRateLimitHeaders(rateLimitResult)
+    });
   } catch (error) {
     console.error('Error fetching projects:', error);
     return NextResponse.json(
@@ -55,12 +75,30 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
 
     if (!session?.user?.id) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Rate limiting (stricter for project creation)
+    const identifier = getRateLimitIdentifier(session.user.id);
+    const rateLimitResult = checkRateLimit(identifier, {
+      maxRequests: 10,
+      windowSeconds: 60,
+      keyPrefix: 'project-create',
+    });
+    
+    if (!rateLimitResult.allowed) {
+      return NextResponse.json(
+        { error: 'Too many requests. Please wait before creating more projects.' },
+        { 
+          status: 429,
+          headers: createRateLimitHeaders(rateLimitResult)
+        }
+      );
     }
 
     const body = await request.json();
@@ -88,12 +126,12 @@ export async function POST(request: Request) {
 
     // Handle GitHub import
     if ('source' in parsed && parsed.source === 'github') {
-      return handleGitHubImport(parsed, session.user.id, user);
+      return handleGitHubImport(parsed, session.user.id, user, rateLimitResult);
     }
 
     // Handle template-based creation (legacy and new format)
     const template = 'template' in parsed ? parsed.template : 'nextjs';
-    return handleTemplateCreation(parsed, template, session.user.id, user);
+    return handleTemplateCreation(parsed, template, session.user.id, user, rateLimitResult);
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json(
@@ -116,7 +154,8 @@ export async function POST(request: Request) {
 async function handleGitHubImport(
   data: { name: string; description?: string; githubUrl: string; autoStartPreview?: boolean },
   userId: string,
-  user: { githubAccessToken?: string | null } | null
+  user: { githubAccessToken?: string | null } | null,
+  rateLimitResult: RateLimitResult
 ) {
   const { name, description, githubUrl, autoStartPreview = true } = data;
 
@@ -166,6 +205,12 @@ async function handleGitHubImport(
     );
     repoPath = result.repoPath;
     detectedTemplate = result.detectedTemplate;
+
+    // Validate repo path to prevent path traversal
+    if (!validateRepoPath(repoPath)) {
+      console.error(`[Projects API] Invalid repo path: ${repoPath}`);
+      throw new Error('Invalid repository path');
+    }
 
     // Update project with repo path and detected template
     await db
@@ -244,7 +289,10 @@ async function handleGitHubImport(
       port: preview.port,
       status: preview.status,
     } : null,
-  }, { status: 201 });
+  }, { 
+    status: 201,
+    headers: createRateLimitHeaders(rateLimitResult)
+  });
 }
 
 /**
@@ -254,7 +302,8 @@ async function handleTemplateCreation(
   data: { name: string; description?: string },
   template: string,
   userId: string,
-  user: { githubAccessToken?: string | null; githubUsername?: string | null } | null
+  user: { githubAccessToken?: string | null; githubUsername?: string | null } | null,
+  rateLimitResult: RateLimitResult
 ) {
   const { name, description } = data;
 
@@ -274,6 +323,13 @@ async function handleTemplateCreation(
   let repoPath: string | null = null;
   try {
     repoPath = await gitManager.initRepository(newProject.id, template);
+    
+    // Validate repo path
+    if (repoPath && !validateRepoPath(repoPath)) {
+      console.error(`[Projects API] Invalid repo path: ${repoPath}`);
+      throw new Error('Invalid repository path');
+    }
+    
     await db
       .update(projects)
       .set({ gitRepoPath: repoPath })
@@ -286,7 +342,7 @@ async function handleTemplateCreation(
   try {
     if (user?.githubAccessToken && user?.githubUsername && repoPath) {
       const githubService = createGitHubService(user.githubAccessToken, user.githubUsername);
-      const repoName = `ai-app-${name.toLowerCase().replace(/\s+/g, '-')}-${newProject.id.slice(0, 8)}`;
+      const repoName = `ai-app-${name.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 50)}-${newProject.id.slice(0, 8)}`;
       
       const repo = await githubService.pushLocalRepoToGitHub(
         repoPath,
@@ -309,5 +365,8 @@ async function handleTemplateCreation(
     // Don't fail the project creation if GitHub push fails
   }
 
-  return NextResponse.json(newProject, { status: 201 });
+  return NextResponse.json(newProject, { 
+    status: 201,
+    headers: createRateLimitHeaders(rateLimitResult)
+  });
 }

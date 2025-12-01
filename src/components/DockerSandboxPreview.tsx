@@ -53,7 +53,7 @@ export function DockerSandboxPreview({
    */
   const checkPreviewAvailability = useCallback(async (previewUrl: string): Promise<boolean> => {
     try {
-      const response = await fetch(previewUrl, { 
+      await fetch(previewUrl, { 
         method: 'HEAD',
         mode: 'no-cors',
         cache: 'no-store'

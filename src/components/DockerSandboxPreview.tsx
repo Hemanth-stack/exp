@@ -35,8 +35,10 @@ export function DockerSandboxPreview({
   const [sandboxInfo, setSandboxInfo] = useState<SandboxInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
+  const [previewReady, setPreviewReady] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const healthCheckInterval = useRef<NodeJS.Timeout | null>(null);
+  const previewCheckInterval = useRef<NodeJS.Timeout | null>(null);
 
   /**
    * Add log entry
@@ -45,6 +47,61 @@ export function DockerSandboxPreview({
     const timestamp = new Date().toLocaleTimeString();
     setLogs((prev) => [...prev, `[${timestamp}] ${message}`]);
   }, []);
+
+  /**
+   * Check if preview URL is accessible
+   */
+  const checkPreviewAvailability = useCallback(async (previewUrl: string): Promise<boolean> => {
+    try {
+      const response = await fetch(previewUrl, { 
+        method: 'HEAD',
+        mode: 'no-cors',
+        cache: 'no-store'
+      });
+      // With no-cors mode, we can't check response.ok, but if fetch doesn't throw, it's likely available
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  /**
+   * Start checking if preview is ready
+   */
+  const startPreviewCheck = useCallback((previewUrl: string) => {
+    // Clear existing interval
+    if (previewCheckInterval.current) {
+      clearInterval(previewCheckInterval.current);
+    }
+
+    setPreviewReady(false);
+    addLog('Waiting for preview service to be available...');
+
+    // Check every 1.5 seconds
+    previewCheckInterval.current = setInterval(async () => {
+      const isAvailable = await checkPreviewAvailability(previewUrl);
+      if (isAvailable) {
+        addLog('Preview service is ready!');
+        setPreviewReady(true);
+        if (previewCheckInterval.current) {
+          clearInterval(previewCheckInterval.current);
+          previewCheckInterval.current = null;
+        }
+      }
+    }, 1500);
+
+    // Also check immediately
+    checkPreviewAvailability(previewUrl).then((isAvailable) => {
+      if (isAvailable) {
+        addLog('Preview service is ready!');
+        setPreviewReady(true);
+        if (previewCheckInterval.current) {
+          clearInterval(previewCheckInterval.current);
+          previewCheckInterval.current = null;
+        }
+      }
+    });
+  }, [addLog, checkPreviewAvailability]);
 
   /**
    * Create or connect to sandbox
@@ -84,7 +141,7 @@ export function DockerSandboxPreview({
       setStatus(data.status);
 
       // Start health checking
-      startHealthCheck(data.sessionId);
+      startHealthCheck(data.sessionId, data.previewUrl);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       setError(errorMessage);
@@ -98,7 +155,7 @@ export function DockerSandboxPreview({
   /**
    * Check sandbox health
    */
-  const checkHealth = useCallback(async (sessionId: string) => {
+  const checkHealth = useCallback(async (sessionId: string, previewUrl?: string) => {
     try {
       const response = await fetch(`/api/sandbox?sessionId=${sessionId}`);
       const data = await response.json();
@@ -114,29 +171,37 @@ export function DockerSandboxPreview({
             clearInterval(healthCheckInterval.current);
             healthCheckInterval.current = null;
           }
+
+          // Start checking if preview is actually accessible
+          if (previewUrl) {
+            startPreviewCheck(previewUrl);
+          }
         }
       }
     } catch (err) {
       console.error('Health check failed:', err);
     }
-  }, [status, addLog]);
+  }, [status, addLog, startPreviewCheck]);
 
   /**
    * Start periodic health checking
    */
   const startHealthCheck = useCallback(
-    (sessionId: string) => {
+    (sessionId: string, previewUrl: string) => {
       // Clear existing interval
       if (healthCheckInterval.current) {
         clearInterval(healthCheckInterval.current);
       }
 
+      // Reset preview ready state
+      setPreviewReady(false);
+
       // Check immediately
-      checkHealth(sessionId);
+      checkHealth(sessionId, previewUrl);
 
       // Check every 2 seconds
       healthCheckInterval.current = setInterval(() => {
-        checkHealth(sessionId);
+        checkHealth(sessionId, previewUrl);
       }, 2000);
     },
     [checkHealth]
@@ -151,6 +216,13 @@ export function DockerSandboxPreview({
     try {
       addLog('Destroying sandbox...');
       setStatus('idle');
+      setPreviewReady(false);
+      
+      // Clear intervals
+      if (previewCheckInterval.current) {
+        clearInterval(previewCheckInterval.current);
+        previewCheckInterval.current = null;
+      }
 
       const response = await fetch(
         `/api/sandbox?sessionId=${sandboxInfo.sessionId}`,
@@ -196,6 +268,9 @@ export function DockerSandboxPreview({
       if (healthCheckInterval.current) {
         clearInterval(healthCheckInterval.current);
       }
+      if (previewCheckInterval.current) {
+        clearInterval(previewCheckInterval.current);
+      }
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -215,6 +290,14 @@ export function DockerSandboxPreview({
           </div>
         );
       case 'healthy':
+        if (!previewReady) {
+          return (
+            <div className="flex items-center space-x-2 text-blue-600">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span className="text-sm">Loading preview...</span>
+            </div>
+          );
+        }
         return (
           <div className="flex items-center space-x-2 text-green-600">
             <CheckCircle className="w-4 h-4" />
@@ -266,7 +349,7 @@ export function DockerSandboxPreview({
 
       {/* Content */}
       <div className="flex-1 relative">
-        {/* Loading State */}
+        {/* Loading State - Creating/Starting */}
         {(status === 'creating' || status === 'starting') && (
           <div className="absolute inset-0 flex items-center justify-center bg-white z-10">
             <div className="text-center space-y-4">
@@ -279,6 +362,26 @@ export function DockerSandboxPreview({
                 </h4>
                 <p className="text-sm text-gray-600 mt-2">
                   This may take up to 30 seconds...
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Loading State - Preview Service Starting */}
+        {status === 'healthy' && !previewReady && sandboxInfo && (
+          <div className="absolute inset-0 flex items-center justify-center bg-white z-10">
+            <div className="text-center space-y-4">
+              <Loader2 className="w-12 h-12 animate-spin text-blue-600 mx-auto" />
+              <div>
+                <h4 className="font-semibold text-gray-900">
+                  Preview is Loading
+                </h4>
+                <p className="text-sm text-gray-600 mt-2">
+                  Waiting for the development server to be ready...
+                </p>
+                <p className="text-xs text-gray-400 mt-1">
+                  This may take a few more seconds
                 </p>
               </div>
             </div>
@@ -299,8 +402,8 @@ export function DockerSandboxPreview({
           </div>
         )}
 
-        {/* Preview iframe */}
-        {sandboxInfo && status === 'healthy' && (
+        {/* Preview iframe - Only show when preview is ready */}
+        {sandboxInfo && status === 'healthy' && previewReady && (
           <iframe
             ref={iframeRef}
             src={sandboxInfo.previewUrl}

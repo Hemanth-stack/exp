@@ -200,25 +200,58 @@ prod-deploy: ## Full production deployment
 # ============================================
 prod-docker-build: ## Build production Docker images
 	@echo "$(BLUE)Building production Docker images...$(NC)"
-	docker-compose -f docker-compose.yml build
+	docker-compose -f docker-compose.prod.yml build
 	docker build -f Dockerfile.sandbox -t nextjs-sandbox:latest .
 	@echo "$(GREEN)✓ Production images built$(NC)"
 
 prod-docker-up: ## Start production containers
 	@echo "$(BLUE)Starting production containers...$(NC)"
-	docker-compose -f docker-compose.yml up -d
+	docker-compose -f docker-compose.prod.yml up -d
 	@echo "$(GREEN)✓ Production containers started$(NC)"
+	@echo ""
+	@echo "$(YELLOW)Application running at: http://localhost:3000$(NC)"
 
 prod-docker-down: ## Stop production containers
 	@echo "$(BLUE)Stopping production containers...$(NC)"
-	docker-compose -f docker-compose.yml down
+	docker-compose -f docker-compose.prod.yml down
 	@echo "$(GREEN)✓ Production containers stopped$(NC)"
 
 prod-docker-logs: ## View production logs
-	docker-compose -f docker-compose.yml logs -f
+	docker-compose -f docker-compose.prod.yml logs -f
 
-prod-docker-deploy: prod-docker-build prod-docker-up ## Full Docker production deployment
+prod-docker-logs-app: ## View only app logs
+	docker-compose -f docker-compose.prod.yml logs -f app
+
+prod-docker-restart: ## Restart production containers
+	@echo "$(BLUE)Restarting production containers...$(NC)"
+	docker-compose -f docker-compose.prod.yml restart
+	@echo "$(GREEN)✓ Production containers restarted$(NC)"
+
+prod-docker-deploy: ## Full Docker production deployment
+	@echo "$(BLUE)Starting Docker production deployment...$(NC)"
+	@echo ""
+	@echo "Step 1/4: Building sandbox image..."
+	@$(MAKE) sandbox-build
+	@echo ""
+	@echo "Step 2/4: Building production images..."
+	@$(MAKE) prod-docker-build
+	@echo ""
+	@echo "Step 3/4: Starting containers..."
+	@$(MAKE) prod-docker-up
+	@echo ""
+	@echo "Step 4/4: Waiting for services to be ready..."
+	@sleep 10
+	@echo ""
 	@echo "$(GREEN)✓ Docker production deployment complete!$(NC)"
+	@echo ""
+	@echo "$(YELLOW)Application running at: http://localhost:3000$(NC)"
+	@echo "$(YELLOW)Database running at: localhost:5433$(NC)"
+	@echo "$(YELLOW)Redis running at: localhost:6379$(NC)"
+
+prod-docker-status: ## Show production container status
+	@echo "$(BLUE)Production Container Status$(NC)"
+	@echo "============================"
+	docker-compose -f docker-compose.prod.yml ps
 
 # ============================================
 # CLEANUP

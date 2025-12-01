@@ -9,9 +9,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/use-toast';
-import { Loader2, Save, User, CreditCard, Shield, BrainCircuit, LogOut, Settings } from 'lucide-react';
+import { Loader2, BrainCircuit, LogOut, Settings } from 'lucide-react';
 
-function Sidebar({ user }: { user: any }) {
+interface SidebarUser {
+  name?: string | null;
+  email?: string | null;
+}
+
+function Sidebar({ user }: { user: SidebarUser }) {
   return (
     <aside className="w-64 flex-shrink-0 border-r bg-background flex flex-col">
       <div className="p-4 border-b">
@@ -101,7 +106,7 @@ export default function SettingsPage() {
       } else {
         throw new Error('Failed to update profile');
       }
-    } catch (error) {
+    } catch {
       toast({
         title: 'Error',
         description: 'Failed to update profile. Please try again.',
@@ -128,7 +133,7 @@ export default function SettingsPage() {
       } else {
         throw new Error('Failed to delete account');
       }
-    } catch (error) {
+    } catch {
       toast({
         title: 'Error',
         description: 'Failed to delete account. Please try again.',

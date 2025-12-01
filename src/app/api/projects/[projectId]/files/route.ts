@@ -6,7 +6,7 @@ import { projects } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import fs from 'fs/promises';
 import path from 'path';
-import { gitManager } from '@/lib/git-manager';
+import { gitManager, normalizeRepoPath } from '@/lib/git-manager';
 
 interface FileNode {
   name: string;
@@ -89,7 +89,9 @@ export async function GET(
       return NextResponse.json({ error: 'Project repository not initialized' }, { status: 400 });
     }
 
-    const files = await buildFileTree(project.gitRepoPath);
+    // Normalize the repo path for Docker environment
+    const repoPath = normalizeRepoPath(project.gitRepoPath);
+    const files = await buildFileTree(repoPath);
 
     return NextResponse.json({ files });
   } catch (error) {
@@ -126,9 +128,12 @@ export async function POST(
       return NextResponse.json({ error: 'Project repository not initialized' }, { status: 400 });
     }
 
+    // Normalize the repo path for Docker environment
+    const repoPath = normalizeRepoPath(project.gitRepoPath);
+
     // Security: ensure path doesn't escape project directory
-    const fullPath = path.join(project.gitRepoPath, relativePath);
-    if (!fullPath.startsWith(project.gitRepoPath)) {
+    const fullPath = path.join(repoPath, relativePath);
+    if (!fullPath.startsWith(repoPath)) {
       return NextResponse.json({ error: 'Invalid file path' }, { status: 400 });
     }
 
@@ -145,7 +150,7 @@ export async function POST(
       const commitMessage = type === 'directory' 
         ? `Created directory: ${relativePath}` 
         : `Created file: ${relativePath}`;
-      await gitManager.commit(project.gitRepoPath, commitMessage);
+      await gitManager.commit(repoPath, commitMessage);
     } catch (commitErr) {
       console.error('Auto-commit error:', commitErr);
       // Don't fail the request if commit fails
@@ -186,11 +191,14 @@ export async function PUT(
       return NextResponse.json({ error: 'Project repository not initialized' }, { status: 400 });
     }
 
+    // Normalize the repo path for Docker environment
+    const repoPath = normalizeRepoPath(project.gitRepoPath);
+
     // Security: ensure paths don't escape project directory
-    const fullOldPath = path.join(project.gitRepoPath, oldPath);
-    const fullNewPath = path.join(project.gitRepoPath, newPath);
+    const fullOldPath = path.join(repoPath, oldPath);
+    const fullNewPath = path.join(repoPath, newPath);
     
-    if (!fullOldPath.startsWith(project.gitRepoPath) || !fullNewPath.startsWith(project.gitRepoPath)) {
+    if (!fullOldPath.startsWith(repoPath) || !fullNewPath.startsWith(repoPath)) {
       return NextResponse.json({ error: 'Invalid file path' }, { status: 400 });
     }
 
@@ -199,7 +207,7 @@ export async function PUT(
     // Auto-commit the rename
     try {
       const commitMessage = `Renamed: ${oldPath} → ${newPath}`;
-      await gitManager.commit(project.gitRepoPath, commitMessage);
+      await gitManager.commit(repoPath, commitMessage);
     } catch (commitErr) {
       console.error('Auto-commit error:', commitErr);
       // Don't fail the request if commit fails
@@ -244,9 +252,12 @@ export async function DELETE(
       return NextResponse.json({ error: 'Project repository not initialized' }, { status: 400 });
     }
 
+    // Normalize the repo path for Docker environment
+    const repoPath = normalizeRepoPath(project.gitRepoPath);
+
     // Security: ensure path doesn't escape project directory
-    const fullPath = path.join(project.gitRepoPath, filePath);
-    if (!fullPath.startsWith(project.gitRepoPath)) {
+    const fullPath = path.join(repoPath, filePath);
+    if (!fullPath.startsWith(repoPath)) {
       return NextResponse.json({ error: 'Invalid file path' }, { status: 400 });
     }
 
@@ -262,7 +273,7 @@ export async function DELETE(
       const commitMessage = stat.isDirectory() 
         ? `Deleted directory: ${filePath}` 
         : `Deleted file: ${filePath}`;
-      await gitManager.commit(project.gitRepoPath, commitMessage);
+      await gitManager.commit(repoPath, commitMessage);
     } catch (commitErr) {
       console.error('Auto-commit error:', commitErr);
       // Don't fail the request if commit fails

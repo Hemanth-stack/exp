@@ -5,6 +5,7 @@ import { db } from '@/db';
 import { projects, users } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { createGitHubService } from '@/lib/github-service';
+import { normalizeRepoPath } from '@/lib/git-manager';
 
 export async function POST(
   request: NextRequest,
@@ -51,6 +52,9 @@ export async function POST(
       );
     }
 
+    // Normalize the repo path for Docker environment
+    const repoPath = normalizeRepoPath(project.gitRepoPath);
+
     const githubService = createGitHubService(user.githubAccessToken, user.githubUsername);
 
     switch (action) {
@@ -59,7 +63,7 @@ export async function POST(
         const repoName = body.repoName || `ai-app-${project.name.toLowerCase().replace(/\s+/g, '-')}-${projectId.slice(0, 8)}`;
         
         const repo = await githubService.pushLocalRepoToGitHub(
-          project.gitRepoPath,
+          repoPath,
           repoName,
           project.description || undefined
         );
@@ -94,7 +98,7 @@ export async function POST(
         }
 
         await githubService.syncToGitHub(
-          project.gitRepoPath,
+          repoPath,
           project.githubRepoName,
           body.commitMessage
         );

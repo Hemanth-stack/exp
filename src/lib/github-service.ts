@@ -2,7 +2,10 @@ import path from 'path';
 import fs from 'fs/promises';
 import simpleGit from 'simple-git';
 
-const REPOS_DIR = path.join(process.cwd(), 'user-repos');
+// Use /app/user-repos in Docker, or process.cwd()/user-repos for local dev
+const REPOS_DIR = process.env.NODE_ENV === 'production' 
+  ? '/app/user-repos'
+  : path.join(process.cwd(), 'user-repos');
 
 interface GitHubRepo {
   name: string;

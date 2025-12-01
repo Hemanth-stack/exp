@@ -1,0 +1,92 @@
+# Production Docker Compose for AI App Builder
+# Usage: docker-compose -f docker-compose.prod.yml up -d
+
+services:
+  # Main Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: appbuilder-app
+    restart: unless-stopped
+    # Run as root to access Docker socket - needed for preview containers
+    user: root
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/appbuilder
+      - REDIS_URL=redis://redis:6379
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - MAX_CONTAINERS_PER_USER=${MAX_CONTAINERS_PER_USER:-6}
+      - CONTAINER_TIMEOUT_MINUTES=${CONTAINER_TIMEOUT_MINUTES:-30}
+      # Host path for Docker-in-Docker volume mounting
+      - HOST_USER_REPOS_PATH=${PWD}/user-repos
+    volumes:
+      - ./user-repos:/app/user-repos
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - appbuilder-network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: appbuilder-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: appbuilder
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - appbuilder-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: appbuilder-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - appbuilder-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  appbuilder-network:
+    driver: bridge

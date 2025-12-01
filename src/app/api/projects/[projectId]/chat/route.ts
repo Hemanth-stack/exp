@@ -8,7 +8,7 @@ import { anthropic } from '@ai-sdk/anthropic';
 import { streamText } from 'ai';
 import fs from 'fs/promises';
 import path from 'path';
-import { gitManager } from '@/lib/git-manager';
+import { gitManager, normalizeRepoPath } from '@/lib/git-manager';
 import { 
   getProjectContext, 
   getFileContext,
@@ -559,7 +559,10 @@ export async function POST(
           let hasContext = false;
           let contextFiles: string[] = [];
           
-          if (project.gitRepoPath) {
+          // Normalize the repo path for Docker environment
+          const repoPath = project.gitRepoPath ? normalizeRepoPath(project.gitRepoPath) : null;
+          
+          if (repoPath) {
             sendStep(controller, {
               type: 'step',
               step: 'context',
@@ -581,7 +584,7 @@ export async function POST(
                     icon: '📄'
                   });
                   
-                  const fileContext = await getFileContext(project.gitRepoPath, intent.targetFile);
+                  const fileContext = await getFileContext(repoPath, intent.targetFile);
                   
                   if (fileContext.targetFile) {
                     contextPrompt = formatFileContextForModification(
@@ -613,7 +616,7 @@ export async function POST(
                     icon: '🔍'
                   });
                   
-                  const projectContext = await getProjectContext(project.gitRepoPath, {
+                  const projectContext = await getProjectContext(repoPath, {
                     maxContext: 40000,
                   });
                   contextPrompt = formatContextForPrompt(projectContext);
@@ -638,7 +641,7 @@ export async function POST(
                   icon: '🔍'
                 });
                 
-                const projectContext = await getProjectContext(project.gitRepoPath, {
+                const projectContext = await getProjectContext(repoPath, {
                   maxContext: 30000,
                 });
                 contextPrompt = formatContextForPrompt(projectContext);
@@ -762,7 +765,7 @@ export async function POST(
           });
 
           // Step 5: Process and write files
-          if (['generate', 'modify', 'improve', 'debug', 'test', 'docs'].includes(intent.type) && project.gitRepoPath) {
+          if (['generate', 'modify', 'improve', 'debug', 'test', 'docs'].includes(intent.type) && repoPath) {
             sendStep(controller, {
               type: 'step',
               step: 'parsing',
@@ -791,7 +794,7 @@ export async function POST(
                 icon: '💾'
               });
 
-              const projectPath = project.gitRepoPath;
+              const projectPath = repoPath;
               let successCount = 0;
               
               for (const file of parsedFiles) {

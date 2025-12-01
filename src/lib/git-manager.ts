@@ -2,7 +2,40 @@ import simpleGit from 'simple-git';
 import path from 'path';
 import fs from 'fs/promises';
 
-const REPOS_DIR = path.join(process.cwd(), 'user-repos');
+// Use /app/user-repos in Docker, or process.cwd()/user-repos for local dev
+const REPOS_DIR = process.env.NODE_ENV === 'production' 
+  ? '/app/user-repos'
+  : path.join(process.cwd(), 'user-repos');
+
+/**
+ * Normalizes a repository path for the current environment
+ * Handles both host paths and container paths
+ */
+export function normalizeRepoPath(storedPath: string): string {
+  // If path is already relative to /app/user-repos, use it directly
+  if (storedPath.startsWith('/app/user-repos')) {
+    return storedPath;
+  }
+  
+  // If running in production (Docker), extract the project ID and rebuild path
+  if (process.env.NODE_ENV === 'production') {
+    // Extract project ID from various path formats
+    const match = storedPath.match(/user-repos[\/\\]([^\/\\]+)/);
+    if (match) {
+      return path.join('/app/user-repos', match[1]);
+    }
+  }
+  
+  // For local dev, if path doesn't start with REPOS_DIR, try to normalize it
+  if (!storedPath.startsWith(REPOS_DIR)) {
+    const match = storedPath.match(/user-repos[\/\\]([^\/\\]+)/);
+    if (match) {
+      return path.join(REPOS_DIR, match[1]);
+    }
+  }
+  
+  return storedPath;
+}
 
 /**
  * Validates and parses a GitHub URL

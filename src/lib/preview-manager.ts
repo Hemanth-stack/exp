@@ -10,6 +10,23 @@ import { getRedisClient, REDIS_KEYS, CONTAINER_LIMITS } from './redis';
 
 const docker = new Docker();
 
+// Host path for user-repos volume binding (Docker-in-Docker requires host paths)
+// Set via environment variable or default to a common path
+const HOST_USER_REPOS_PATH = process.env.HOST_USER_REPOS_PATH || '/Users/hemanthirivichetty/Desktop/low_code_platform/exp/user-repos';
+
+/**
+ * Convert container path to host path for Docker-in-Docker volume mounting
+ * When running inside a container, we need to use the actual host path
+ */
+function getHostPath(containerPath: string): string {
+  // If running in production (Docker) and path starts with /app/user-repos
+  if (process.env.NODE_ENV === 'production' && containerPath.startsWith('/app/user-repos')) {
+    const relativePath = containerPath.replace('/app/user-repos', '');
+    return path.join(HOST_USER_REPOS_PATH, relativePath);
+  }
+  return containerPath;
+}
+
 export interface PreviewContainer {
   containerId: string;
   port: number;
@@ -338,12 +355,18 @@ class PreviewManager {
         throw new Error(projectConfig.errorMessage || 'Unsupported project type');
       }
 
+      // Get the host path for Docker-in-Docker volume binding
+      const hostRepoPath = getHostPath(repoPath);
+      console.log(`[PreviewManager] Using host path for volume: ${hostRepoPath}`);
+
       // Create container based on project type
       const container = await docker.createContainer({
         Image: projectConfig.image,
         name: `preview-${projectId}`,
         WorkingDir: projectConfig.workDir,
         Cmd: projectConfig.command,
+        Tty: true,
+        OpenStdin: true,
         ExposedPorts: {
           [`${projectConfig.containerPort}/tcp`]: {},
         },
@@ -351,7 +374,7 @@ class PreviewManager {
           PortBindings: {
             [`${projectConfig.containerPort}/tcp`]: [{ HostPort: port.toString() }],
           },
-          Binds: [`${repoPath}:${projectConfig.mountPath}`],
+          Binds: [`${hostRepoPath}:${projectConfig.mountPath}`],
           AutoRemove: false,
         },
         Env: projectConfig.env,
@@ -511,12 +534,13 @@ class PreviewManager {
       const useCustomImage = await this.dockerImageExists('nextjs-sandbox:latest');
       if (useCustomImage) {
         image = 'nextjs-sandbox:latest';
-        command = ['sh', '-c', 'cd /app/user-project && npm install && npm run dev'];
+        // Use exec to ensure proper process management and signal handling
+        command = ['sh', '-c', 'cd /app/user-project && npm install --legacy-peer-deps 2>/dev/null; exec npm run dev'];
         workDir = '/app';
         mountPath = '/app/user-project';
       } else {
         image = 'node:18-alpine';
-        command = ['sh', '-c', 'npm install && npm run dev'];
+        command = ['sh', '-c', 'npm install --legacy-peer-deps 2>/dev/null; exec npm run dev'];
         workDir = '/app';
         mountPath = '/app';
       }

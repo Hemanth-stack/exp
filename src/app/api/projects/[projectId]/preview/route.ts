@@ -5,6 +5,7 @@ import { db } from '@/db';
 import { projects } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { previewManager, ContainerLimitError } from '@/lib/preview-manager';
+import { normalizeRepoPath } from '@/lib/git-manager';
 
 export async function POST(
   request: Request,
@@ -38,8 +39,11 @@ export async function POST(
       return NextResponse.json({ error: 'Project repository not found' }, { status: 404 });
     }
 
+    // Normalize the repo path for Docker environment
+    const repoPath = normalizeRepoPath(project.gitRepoPath);
+
     // Start preview with userId for container limits
-    const preview = await previewManager.startPreview(projectId, project.gitRepoPath, session.user.id);
+    const preview = await previewManager.startPreview(projectId, repoPath, session.user.id);
 
     // Update project status
     await db

@@ -4,7 +4,7 @@ import { authOptions } from '@/lib/auth-config';
 import { db } from '@/db';
 import { projects } from '@/db/schema';
 import { eq } from 'drizzle-orm';
-import { GitManager } from '@/lib/git-manager';
+import { GitManager, normalizeRepoPath } from '@/lib/git-manager';
 
 const gitManager = new GitManager();
 
@@ -37,21 +37,24 @@ export async function GET(
       return NextResponse.json({ error: 'Project repository not initialized' }, { status: 400 });
     }
 
+    // Normalize the repo path for Docker environment
+    const repoPath = normalizeRepoPath(project.gitRepoPath);
+
     switch (action) {
       case 'log':
-        const log = await gitManager.getLog(project.gitRepoPath, 50);
+        const log = await gitManager.getLog(repoPath, 50);
         return NextResponse.json({ commits: log });
 
       case 'status':
-        const status = await gitManager.getStatus(project.gitRepoPath);
+        const status = await gitManager.getStatus(repoPath);
         return NextResponse.json({ status });
 
       case 'diff':
-        const diff = await gitManager.getDiff(project.gitRepoPath, commitSha || undefined);
+        const diff = await gitManager.getDiff(repoPath, commitSha || undefined);
         return NextResponse.json({ diff });
 
       case 'branches':
-        const branches = await gitManager.getBranches(project.gitRepoPath);
+        const branches = await gitManager.getBranches(repoPath);
         return NextResponse.json({ branches });
 
       default:
@@ -91,26 +94,29 @@ export async function POST(
       return NextResponse.json({ error: 'Project repository not initialized' }, { status: 400 });
     }
 
+    // Normalize the repo path for Docker environment
+    const repoPath = normalizeRepoPath(project.gitRepoPath);
+
     switch (action) {
       case 'commit':
         if (!message) {
           return NextResponse.json({ error: 'Commit message required' }, { status: 400 });
         }
-        await gitManager.commit(project.gitRepoPath, message);
+        await gitManager.commit(repoPath, message);
         return NextResponse.json({ success: true });
 
       case 'revert':
         if (!commitSha) {
           return NextResponse.json({ error: 'Commit SHA required' }, { status: 400 });
         }
-        await gitManager.revertToCommit(project.gitRepoPath, commitSha);
+        await gitManager.revertToCommit(repoPath, commitSha);
         return NextResponse.json({ success: true });
 
       case 'checkout':
         if (!branch) {
           return NextResponse.json({ error: 'Branch name required' }, { status: 400 });
         }
-        await gitManager.checkout(project.gitRepoPath, branch);
+        await gitManager.checkout(repoPath, branch);
         return NextResponse.json({ success: true });
 
       default:

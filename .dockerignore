@@ -48,7 +48,9 @@ README.md
 # Database
 *.db
 *.db-journal
-drizzle
+
+# Don't exclude drizzle - needed for migrations
+# drizzle
 
 # Sandbox instances (runtime data)
 sandbox-instances

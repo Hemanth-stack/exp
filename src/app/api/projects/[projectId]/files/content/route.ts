@@ -6,7 +6,7 @@ import { projects, users } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import fs from 'fs/promises';
 import path from 'path';
-import { gitManager } from '@/lib/git-manager';
+import { gitManager, normalizeRepoPath } from '@/lib/git-manager';
 
 export async function GET(
   request: NextRequest,
@@ -40,9 +40,12 @@ export async function GET(
       return NextResponse.json({ error: 'Project repository not initialized' }, { status: 400 });
     }
 
+    // Normalize the repo path for Docker environment
+    const repoPath = normalizeRepoPath(project.gitRepoPath);
+
     // Security: ensure path doesn't escape project directory
-    const fullPath = path.join(project.gitRepoPath, filePath);
-    if (!fullPath.startsWith(project.gitRepoPath)) {
+    const fullPath = path.join(repoPath, filePath);
+    if (!fullPath.startsWith(repoPath)) {
       return NextResponse.json({ error: 'Invalid file path' }, { status: 400 });
     }
 
@@ -119,9 +122,12 @@ export async function PUT(
       return NextResponse.json({ error: 'Project repository not initialized' }, { status: 400 });
     }
 
+    // Normalize the repo path for Docker environment
+    const repoPath = normalizeRepoPath(project.gitRepoPath);
+
     // Security: ensure path doesn't escape project directory
-    const fullPath = path.join(project.gitRepoPath, filePath);
-    if (!fullPath.startsWith(project.gitRepoPath)) {
+    const fullPath = path.join(repoPath, filePath);
+    if (!fullPath.startsWith(repoPath)) {
       return NextResponse.json({ error: 'Invalid file path' }, { status: 400 });
     }
 
@@ -143,7 +149,7 @@ export async function PUT(
         
         // Pass the GitHub URL if available, or let the git manager use existing remote
         syncResult = await gitManager.commitAndPush(
-          project.gitRepoPath, 
+          repoPath, 
           commitMessage,
           user.githubAccessToken,
           project.githubRepoUrl || undefined
@@ -156,7 +162,7 @@ export async function PUT(
         }
       } else {
         // Just commit locally if no GitHub token
-        await gitManager.commit(project.gitRepoPath, `Updated file: ${filePath}`);
+        await gitManager.commit(repoPath, `Updated file: ${filePath}`);
         syncResult.committed = true;
         console.log(`[Files API] Committed changes locally (no GitHub token)`);
       }

@@ -4,7 +4,7 @@ import { authOptions } from '@/lib/auth-config';
 import { db } from '@/db';
 import { projects, deployments } from '@/db/schema';
 import { eq } from 'drizzle-orm';
-import { GitManager } from '@/lib/git-manager';
+import { GitManager, normalizeRepoPath } from '@/lib/git-manager';
 import Docker from 'dockerode';
 
 const docker = new Docker();
@@ -153,9 +153,12 @@ export async function POST(
       return NextResponse.json({ error: 'Project repository not initialized' }, { status: 400 });
     }
 
+    // Normalize the repo path for Docker environment
+    const repoPath = normalizeRepoPath(project.gitRepoPath);
+
     // Get current git commit
     const gitManager = new GitManager();
-    const log = await gitManager.getLog(project.gitRepoPath, 1);
+    const log = await gitManager.getLog(repoPath, 1);
     const commitSha = log[0]?.hash || 'initial';
 
     // Create deployment record
@@ -169,7 +172,7 @@ export async function POST(
       .returning();
 
     // Build project
-    const buildResult = await buildProject(project.gitRepoPath);
+    const buildResult = await buildProject(repoPath);
 
     if (!buildResult.success) {
       await db
@@ -190,7 +193,7 @@ export async function POST(
     const { url } = await deployProject(
       project.id,
       project.name,
-      project.gitRepoPath
+      repoPath
     );
 
     // Update deployment record

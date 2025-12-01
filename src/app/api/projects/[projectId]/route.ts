@@ -6,6 +6,7 @@ import { projects, conversations, messages } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { z } from 'zod';
 import fs from 'fs/promises';
+import { normalizeRepoPath } from '@/lib/git-manager';
 
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(255).optional(),
@@ -162,7 +163,8 @@ export async function DELETE(
     // Attempt to delete git repository directory
     if (existingProject.gitRepoPath) {
       try {
-        await fs.rm(existingProject.gitRepoPath, { recursive: true, force: true });
+        const repoPath = normalizeRepoPath(existingProject.gitRepoPath);
+        await fs.rm(repoPath, { recursive: true, force: true });
       } catch (error) {
         console.error('Error deleting git repository:', error);
         // Continue even if deletion fails

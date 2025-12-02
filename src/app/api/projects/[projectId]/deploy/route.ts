@@ -73,7 +73,7 @@ async function deployProject(
       }
       const port = existing.Ports.find(p => p.PrivatePort === 3000)?.PublicPort || 3000;
       return {
-        url: `http://localhost:${port}`,
+        url: `http://${process.env.PREVIEW_HOST || 'localhost'}:${port}`,
         containerId: existing.Id,
       };
     }
@@ -118,7 +118,7 @@ async function deployProject(
     await container.start();
 
     return {
-      url: `http://localhost:${port}`,
+      url: `http://${process.env.PREVIEW_HOST || 'localhost'}:${port}`,
       containerId: container.id,
     };
   } catch (error) {

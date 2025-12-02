@@ -409,7 +409,7 @@ export default function SandboxPage({
             <div className="h-full bg-background rounded-lg border overflow-hidden shadow-lg">
               <iframe
                 key={iframeKey}
-                src={preview.url}
+                src={`/api/projects/${projectId}/preview/proxy?path=/`}
                 className="w-full h-full border-0"
                 title={`Preview of ${project.name}`}
                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"

@@ -8,6 +8,9 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 
+// Get preview host from environment or default to localhost
+const getPreviewHost = () => process.env.PREVIEW_HOST || 'localhost';
+
 // Initialize Dockerode client connecting to local Docker socket
 const docker = new Dockerode({
   socketPath: process.platform === 'win32' 
@@ -103,7 +106,7 @@ async function syncWithDocker(): Promise<void> {
             containerId: containerInfo.Id,
             sessionId,
             port,
-            previewUrl: `http://localhost:${port}`,
+            previewUrl: `http://${getPreviewHost()}:${port}`,
             status: containerInfo.State === 'running' ? 'healthy' : 'stopped',
             createdAt: new Date(containerInfo.Created * 1000),
             lastAccessedAt: new Date(),
@@ -288,7 +291,7 @@ export async function createSandbox(config: SandboxConfig): Promise<SandboxInfo>
       containerId: container.id,
       sessionId,
       port,
-      previewUrl: `http://localhost:${port}`,
+      previewUrl: `http://${getPreviewHost()}:${port}`,
       status: 'starting',
       createdAt: new Date(),
       lastAccessedAt: new Date(),

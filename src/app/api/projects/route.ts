@@ -285,7 +285,7 @@ async function handleGitHubImport(
     detectedType: detectedTemplate,
     isPreviewSupported,
     preview: preview ? {
-      url: `http://localhost:${preview.port}`,
+      url: `http://${process.env.PREVIEW_HOST || 'localhost'}:${preview.port}`,
       port: preview.port,
       status: preview.status,
     } : null,
@@ -323,6 +323,7 @@ async function handleTemplateCreation(
   let repoPath: string | null = null;
   try {
     repoPath = await gitManager.initRepository(newProject.id, template);
+    console.log(`[Projects API] Initialized repo at: ${repoPath}`);
     
     // Validate repo path
     if (repoPath && !validateRepoPath(repoPath)) {
@@ -334,8 +335,11 @@ async function handleTemplateCreation(
       .update(projects)
       .set({ gitRepoPath: repoPath })
       .where(eq(projects.id, newProject.id));
+    
+    console.log(`[Projects API] Updated project ${newProject.id} with gitRepoPath: ${repoPath}`);
   } catch (error) {
     console.error('Error initializing git repository:', error);
+    // Still continue - project is created but without local files
   }
 
   // Auto-push to GitHub if user has GitHub connected
@@ -365,7 +369,14 @@ async function handleTemplateCreation(
     // Don't fail the project creation if GitHub push fails
   }
 
-  return NextResponse.json(newProject, { 
+  // Fetch the updated project with gitRepoPath
+  const [updatedProject] = await db
+    .select()
+    .from(projects)
+    .where(eq(projects.id, newProject.id))
+    .limit(1);
+
+  return NextResponse.json(updatedProject || newProject, { 
     status: 201,
     headers: createRateLimitHeaders(rateLimitResult)
   });

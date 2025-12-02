@@ -30,8 +30,8 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
-# Install Docker CLI for container management
-RUN apk add --no-cache docker-cli
+# Install Docker CLI and git for container management and repository cloning
+RUN apk add --no-cache docker-cli git
 
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs

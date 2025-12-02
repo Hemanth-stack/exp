@@ -7,8 +7,8 @@ if (!process.env.DATABASE_URL && process.env.NODE_ENV === 'production') {
 export default {
   schema: './src/db/schema.ts',
   out: './drizzle',
-  driver: 'pg',
+  dialect: 'postgresql',
   dbCredentials: {
-    connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5433/appbuilder',
+    url: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5433/appbuilder',
   },
 } satisfies Config;

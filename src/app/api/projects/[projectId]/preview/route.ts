@@ -57,7 +57,7 @@ export async function POST(
     return NextResponse.json({
       success: true,
       preview: {
-        url: `http://localhost:${preview.port}`,
+        url: `http://${process.env.PREVIEW_HOST || 'localhost'}:${preview.port}`,
         port: preview.port,
         status: preview.status,
       },
@@ -176,7 +176,7 @@ export async function GET(
 
     return NextResponse.json({
       status,
-      url: status === 'running' ? `http://localhost:${preview.port}` : null,
+      url: status === 'running' ? `http://${process.env.PREVIEW_HOST || 'localhost'}:${preview.port}` : null,
       port: preview.port,
     });
   } catch (error: unknown) {

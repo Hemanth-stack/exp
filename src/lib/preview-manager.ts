@@ -381,6 +381,7 @@ class PreviewManager {
         Cmd: projectConfig.command,
         Tty: true,
         OpenStdin: true,
+        User: 'root', // Run as root to avoid permission issues with mounted volumes
         ExposedPorts: {
           [`${projectConfig.containerPort}/tcp`]: {},
         },

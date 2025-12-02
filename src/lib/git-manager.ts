@@ -321,9 +321,14 @@ export class GitManager {
     const templatePath = path.join(process.cwd(), 'templates', template);
     await this.copyTemplate(templatePath, repoPath);
 
-    // Initialize git
+    // Initialize git with default user config
     const git = simpleGit(repoPath);
     await git.init();
+    
+    // Set local git config for this repo to avoid "Author identity unknown" error
+    await git.addConfig('user.email', 'builder@appbuilder.local', false, 'local');
+    await git.addConfig('user.name', 'App Builder', false, 'local');
+    
     await git.add('.');
     await git.commit('Initial commit');
 

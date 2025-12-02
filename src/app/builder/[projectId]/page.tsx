@@ -1337,7 +1337,7 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => window.open(previewUrl, '_blank')}
+                        onClick={() => window.open(`/api/projects/${projectId}/preview/proxy?path=/`, '_blank')}
                       >
                         <ExternalLink className="h-4 w-4" />
                       </Button>
@@ -1393,7 +1393,7 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                       <iframe
                         key={previewKey}
                         ref={iframeRef}
-                        src={previewUrl}
+                        src={`/api/projects/${projectId}/preview/proxy?path=/`}
                         className="w-full h-full border-0"
                         title="Preview"
                       />

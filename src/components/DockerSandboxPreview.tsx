@@ -21,6 +21,7 @@ type SandboxStatus = 'idle' | 'creating' | 'starting' | 'healthy' | 'unhealthy' 
 interface SandboxInfo {
   sessionId: string;
   previewUrl: string;
+  proxyUrl: string;
   status: SandboxStatus;
   port: number;
 }
@@ -49,17 +50,15 @@ export function DockerSandboxPreview({
   }, []);
 
   /**
-   * Check if preview URL is accessible
+   * Check if preview URL is accessible via proxy
    */
-  const checkPreviewAvailability = useCallback(async (previewUrl: string): Promise<boolean> => {
+  const checkPreviewAvailability = useCallback(async (sessionId: string): Promise<boolean> => {
     try {
-      await fetch(previewUrl, { 
+      const response = await fetch(`/api/sandbox/proxy?sessionId=${sessionId}&path=/`, { 
         method: 'HEAD',
-        mode: 'no-cors',
         cache: 'no-store'
       });
-      // With no-cors mode, we can't check response.ok, but if fetch doesn't throw, it's likely available
-      return true;
+      return response.ok;
     } catch {
       return false;
     }
@@ -68,7 +67,7 @@ export function DockerSandboxPreview({
   /**
    * Start checking if preview is ready
    */
-  const startPreviewCheck = useCallback((previewUrl: string) => {
+  const startPreviewCheck = useCallback((sessionId: string) => {
     // Clear existing interval
     if (previewCheckInterval.current) {
       clearInterval(previewCheckInterval.current);
@@ -79,7 +78,7 @@ export function DockerSandboxPreview({
 
     // Check every 1.5 seconds
     previewCheckInterval.current = setInterval(async () => {
-      const isAvailable = await checkPreviewAvailability(previewUrl);
+      const isAvailable = await checkPreviewAvailability(sessionId);
       if (isAvailable) {
         addLog('Preview service is ready!');
         setPreviewReady(true);
@@ -91,7 +90,7 @@ export function DockerSandboxPreview({
     }, 1500);
 
     // Also check immediately
-    checkPreviewAvailability(previewUrl).then((isAvailable) => {
+    checkPreviewAvailability(sessionId).then((isAvailable) => {
       if (isAvailable) {
         addLog('Preview service is ready!');
         setPreviewReady(true);
@@ -133,6 +132,7 @@ export function DockerSandboxPreview({
       setSandboxInfo({
         sessionId: data.sessionId,
         previewUrl: data.previewUrl,
+        proxyUrl: `/api/sandbox/proxy?sessionId=${data.sessionId}&path=/`,
         status: data.status,
         port: data.port,
       });
@@ -141,7 +141,7 @@ export function DockerSandboxPreview({
       setStatus(data.status);
 
       // Start health checking
-      startHealthCheck(data.sessionId, data.previewUrl);
+      startHealthCheck(data.sessionId);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       setError(errorMessage);
@@ -155,7 +155,7 @@ export function DockerSandboxPreview({
   /**
    * Check sandbox health
    */
-  const checkHealth = useCallback(async (sessionId: string, previewUrl?: string) => {
+  const checkHealth = useCallback(async (sessionId: string) => {
     try {
       const response = await fetch(`/api/sandbox?sessionId=${sessionId}`);
       const data = await response.json();
@@ -172,10 +172,8 @@ export function DockerSandboxPreview({
             healthCheckInterval.current = null;
           }
 
-          // Start checking if preview is actually accessible
-          if (previewUrl) {
-            startPreviewCheck(previewUrl);
-          }
+          // Start checking if preview is actually accessible via proxy
+          startPreviewCheck(sessionId);
         }
       }
     } catch (err) {
@@ -187,7 +185,7 @@ export function DockerSandboxPreview({
    * Start periodic health checking
    */
   const startHealthCheck = useCallback(
-    (sessionId: string, previewUrl: string) => {
+    (sessionId: string) => {
       // Clear existing interval
       if (healthCheckInterval.current) {
         clearInterval(healthCheckInterval.current);
@@ -197,11 +195,11 @@ export function DockerSandboxPreview({
       setPreviewReady(false);
 
       // Check immediately
-      checkHealth(sessionId, previewUrl);
+      checkHealth(sessionId);
 
       // Check every 2 seconds
       healthCheckInterval.current = setInterval(() => {
-        checkHealth(sessionId, previewUrl);
+        checkHealth(sessionId);
       }, 2000);
     },
     [checkHealth]
@@ -406,7 +404,7 @@ export function DockerSandboxPreview({
         {sandboxInfo && status === 'healthy' && previewReady && (
           <iframe
             ref={iframeRef}
-            src={sandboxInfo.previewUrl}
+            src={`/api/sandbox/preview?sessionId=${sandboxInfo.sessionId}&path=/`}
             className="w-full h-full border-0"
             title="Component Preview"
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"

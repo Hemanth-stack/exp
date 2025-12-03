@@ -50,6 +50,12 @@ const stepConfig: Record<string, {
     color: 'text-indigo-400',
     bgColor: 'bg-indigo-500/10'
   },
+  planning: { 
+    label: 'Planning', 
+    icon: <Brain className="h-4 w-4" />, 
+    color: 'text-teal-400',
+    bgColor: 'bg-teal-500/10'
+  },
   thinking: { 
     label: 'Thinking', 
     icon: <Brain className="h-4 w-4" />, 
@@ -80,6 +86,24 @@ const stepConfig: Record<string, {
     color: 'text-emerald-400',
     bgColor: 'bg-emerald-500/10'
   },
+  committing: { 
+    label: 'Git Commit', 
+    icon: <Save className="h-4 w-4" />, 
+    color: 'text-amber-400',
+    bgColor: 'bg-amber-500/10'
+  },
+  pushing: { 
+    label: 'GitHub Push', 
+    icon: <Sparkles className="h-4 w-4" />, 
+    color: 'text-violet-400',
+    bgColor: 'bg-violet-500/10'
+  },
+  terminal: { 
+    label: 'Terminal', 
+    icon: <FileCode className="h-4 w-4" />, 
+    color: 'text-lime-400',
+    bgColor: 'bg-lime-500/10'
+  },
   complete: { 
     label: 'Complete', 
     icon: <CheckCircle2 className="h-4 w-4" />, 
@@ -93,11 +117,15 @@ const stepOrder = [
   'context',
   'reading_file',
   'analyzing',
+  'planning',
   'thinking',
   'generating',
   'parsing',
   'writing',
   'file_write',
+  'committing',
+  'pushing',
+  'terminal',
   'complete',
 ];
 

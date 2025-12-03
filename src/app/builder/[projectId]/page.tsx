@@ -36,6 +36,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import Link from 'next/link';
+import { cn } from '@/lib/utils';
 
 // Chat Mode type
 type ChatMode = 'chat' | 'agent';
@@ -756,6 +757,15 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
               if (data.type === 'step') {
                 // Handle step updates
                 setAgentSteps(prev => [...prev, data as AgentStep]);
+              } else if (data.type === 'thinking') {
+                // Handle thinking/planning output - add to agent steps for visibility
+                setAgentSteps(prev => [...prev, {
+                  type: 'step',
+                  step: 'thinking',
+                  status: 'complete',
+                  message: data.content,
+                  icon: '💭'
+                } as AgentStep]);
               } else if (data.type === 'status') {
                 // Legacy status updates - convert to step format
                 setCurrentMessage(data.message || 'Processing...');
@@ -808,6 +818,14 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                   fetchFiles();
                   setOpenTabs([]);
                   setActiveTab(null);
+                  
+                  // Auto-refresh preview when files are created/updated
+                  if (previewStatus === 'running') {
+                    // Small delay to let the file system sync
+                    setTimeout(() => {
+                      setPreviewKey(prev => prev + 1);
+                    }, 500);
+                  }
                 }
               }
             } catch {
@@ -1475,10 +1493,25 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
             <div className="flex-1 overflow-hidden">
               {viewMode === 'preview' ? (
                 /* Live Preview */
-                <div className="h-full flex items-center justify-center bg-muted/20">
+                <div className="h-full flex items-center justify-center bg-muted/20 relative">
+                  {/* Blur overlay during agent execution */}
+                  {isStreaming && (
+                    <div className="absolute inset-0 z-10 bg-background/50 backdrop-blur-sm flex items-center justify-center">
+                      <div className="bg-card border rounded-lg p-4 shadow-lg flex items-center gap-3">
+                        <Loader2 className="h-5 w-5 animate-spin text-primary" />
+                        <div>
+                          <p className="font-medium text-sm">Agent is working...</p>
+                          <p className="text-xs text-muted-foreground">Preview will refresh when done</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   {previewStatus === 'running' && previewUrl ? (
                     <div
-                      className="h-full bg-white transition-all duration-300"
+                      className={cn(
+                        "h-full bg-white transition-all duration-300",
+                        isStreaming && "opacity-50"
+                      )}
                       style={{ width: deviceSizes[previewDevice].width }}
                     >
                       <iframe

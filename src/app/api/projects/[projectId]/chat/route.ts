@@ -583,6 +583,14 @@ export async function POST(
       safeEnqueue(controller, `data: ${JSON.stringify(step)}\n\n`);
     };
 
+    // Helper to send thinking/planning output
+    const sendThinking = (controller: ReadableStreamDefaultController, thought: string) => {
+      safeEnqueue(controller, `data: ${JSON.stringify({
+        type: 'thinking',
+        content: thought,
+      })}\n\n`);
+    };
+
     const stream = new ReadableStream({
       async start(controller) {
         try {
@@ -756,11 +764,56 @@ export async function POST(
             }
           }
 
-          // Step 3: Generating code / Thinking
+          // Step 3: Planning / Thinking
           // Use mode-based system prompt with memory context
           const systemPrompt = chatMode === 'chat' 
             ? buildSystemPrompt('chat', memoryLane)
             : getSystemPrompt(intent.type, hasContext);
+          
+          // Send planning information based on intent
+          const planningInfo: Record<string, string> = {
+            'generate': `Planning to create new ${intent.targetFile ? intent.targetFile : 'components'}...`,
+            'modify': `Planning to modify ${intent.targetFile || 'existing code'}...`,
+            'debug': `Analyzing potential bugs and fixes...`,
+            'improve': `Identifying optimization opportunities...`,
+            'analyze': `Preparing code analysis...`,
+            'architect': `Designing system architecture...`,
+            'test': `Planning test coverage...`,
+            'security': `Scanning for vulnerabilities...`,
+            'docs': `Planning documentation structure...`,
+            'deploy': `Preparing deployment configuration...`,
+            'review': `Setting up code review criteria...`,
+          };
+          
+          sendStep(controller, {
+            type: 'step',
+            step: 'planning',
+            status: 'start',
+            message: planningInfo[intent.type] || 'Planning approach...',
+            details: `Mode: ${chatMode} | Intent: ${intent.type}`,
+            icon: '📋'
+          });
+          
+          // Send initial thinking output
+          sendThinking(controller, `🎯 **Goal**: ${userMessage.slice(0, 100)}${userMessage.length > 100 ? '...' : ''}`);
+          
+          if (intent.targetFile) {
+            sendThinking(controller, `📁 **Target**: ${intent.targetFile}`);
+          }
+          
+          if (contextFiles.length > 0) {
+            sendThinking(controller, `📚 **Context**: ${contextFiles.length} files loaded`);
+          }
+          
+          await new Promise(resolve => setTimeout(resolve, 200));
+          
+          sendStep(controller, {
+            type: 'step',
+            step: 'planning',
+            status: 'complete',
+            message: 'Plan ready',
+            icon: '✅'
+          });
           
           sendStep(controller, {
             type: 'step',

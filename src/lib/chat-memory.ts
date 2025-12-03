@@ -44,10 +44,13 @@ export interface ConversationMessage {
 
 export interface MemoryLane {
   shortTermMemory: ConversationMessage[]; // Recent messages (last 10)
+  longTermSummary: string | null; // Summary of older conversation
   requirements: ProjectRequirements | null;
   conversationSummary: string | null;
   keyDecisions: string[];
   implementedFeatures: string[];
+  recentFiles: string[]; // Recently created/modified files
+  contextWindow: number; // Total context tokens used
 }
 
 /**
@@ -55,13 +58,20 @@ export interface MemoryLane {
  * This gives the AI context about what has been discussed and implemented
  */
 export function buildMemoryLane(history: ConversationMessage[]): MemoryLane {
-  const shortTermMemory = history.slice(-10); // Last 10 messages
+  // Keep more recent messages for better context (last 15 instead of 10)
+  const shortTermMemory = history.slice(-15);
+  
+  // Generate summary of older conversation (if more than 15 messages)
+  const olderMessages = history.slice(0, -15);
+  const longTermSummary = olderMessages.length > 0 
+    ? generateDetailedSummary(olderMessages) 
+    : null;
   
   // Extract requirements from conversation
   const requirements = extractRequirements(history);
   
-  // Generate summary of earlier conversation
-  const conversationSummary = generateSummary(history.slice(0, -10));
+  // Generate summary of earlier conversation (legacy)
+  const conversationSummary = generateSummary(history.slice(0, -15));
   
   // Extract key decisions
   const keyDecisions = extractKeyDecisions(history);
@@ -69,12 +79,21 @@ export function buildMemoryLane(history: ConversationMessage[]): MemoryLane {
   // Track what's been implemented
   const implementedFeatures = extractImplementedFeatures(history);
   
+  // Track recently created files
+  const recentFiles = extractRecentFiles(history);
+  
+  // Estimate context window usage
+  const contextWindow = estimateTokens(shortTermMemory, requirements, keyDecisions);
+  
   return {
     shortTermMemory,
+    longTermSummary,
     requirements,
     conversationSummary,
     keyDecisions,
     implementedFeatures,
+    recentFiles,
+    contextWindow,
   };
 }
 
@@ -162,6 +181,87 @@ function generateSummary(messages: ConversationMessage[]): string | null {
   return topics.length > 0 
     ? `Earlier discussion covered: ${topics.slice(0, 500)}...`
     : null;
+}
+
+/**
+ * Generate a more detailed summary of older conversation
+ */
+function generateDetailedSummary(messages: ConversationMessage[]): string {
+  if (messages.length === 0) return '';
+  
+  const summary: string[] = [];
+  
+  // Extract key topics from user messages
+  const userTopics = messages
+    .filter(m => m.role === 'user')
+    .map(m => m.content.slice(0, 150))
+    .slice(-5);
+  
+  if (userTopics.length > 0) {
+    summary.push(`User discussed: ${userTopics.join('; ')}`);
+  }
+  
+  // Extract what was created
+  const filesCreated = messages
+    .filter(m => m.role === 'assistant' && m.metadata?.filesCreated)
+    .flatMap(m => m.metadata!.filesCreated || []);
+  
+  if (filesCreated.length > 0) {
+    summary.push(`Files created: ${filesCreated.slice(-10).join(', ')}`);
+  }
+  
+  // Detect mode switches
+  const modeChanges = messages.filter(m => m.metadata?.modeSwitch);
+  if (modeChanges.length > 0) {
+    summary.push(`Mode switches: ${modeChanges.length}`);
+  }
+  
+  return summary.join('. ');
+}
+
+/**
+ * Extract recently created files from conversation
+ */
+function extractRecentFiles(history: ConversationMessage[]): string[] {
+  const files: string[] = [];
+  
+  // Get files from last 10 assistant messages
+  const recentAssistant = history
+    .filter(m => m.role === 'assistant')
+    .slice(-10);
+  
+  for (const msg of recentAssistant) {
+    if (msg.metadata?.filesCreated) {
+      files.push(...msg.metadata.filesCreated);
+    }
+  }
+  
+  // Return unique files, most recent first
+  return [...new Set(files)].slice(-20);
+}
+
+/**
+ * Estimate token usage for context window
+ */
+function estimateTokens(
+  messages: ConversationMessage[],
+  requirements: ProjectRequirements | null,
+  decisions: string[]
+): number {
+  // Rough estimate: 1 token ≈ 4 characters
+  let chars = 0;
+  
+  for (const msg of messages) {
+    chars += msg.content.length;
+  }
+  
+  if (requirements) {
+    chars += JSON.stringify(requirements).length;
+  }
+  
+  chars += decisions.join('').length;
+  
+  return Math.ceil(chars / 4);
 }
 
 /**

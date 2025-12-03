@@ -419,6 +419,9 @@ export class GitManager {
     try {
       await git.clone(cloneUrl, repoPath, ['--depth', '1']);
       console.log(`[GitManager] Cloned repository to ${repoPath}`);
+      
+      // Ensure .gitignore exists after clone
+      await ensureGitIgnore(repoPath);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.error('[GitManager] Clone failed:', message);

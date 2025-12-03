@@ -518,3 +518,180 @@ export async function getContainerLogs(
     return { stdout: '', stderr: error instanceof Error ? error.message : 'Unknown error' };
   }
 }
+
+/**
+ * Agent-specific command patterns (broader set for agent use)
+ * These commands are allowed when the agent needs to run them
+ */
+const AGENT_COMMAND_PATTERNS: RegExp[] = [
+  // All user-allowed commands
+  ...ALLOWED_COMMAND_PATTERNS,
+  
+  // Additional commands the agent can run
+  /^npm run \w+$/,                     // Any npm script
+  /^npx [\w@\/-]+ --[\w-]+(=[\w-]+)?$/, // npx with flags
+  /^mkdir -p [\w\/.@-]+$/,              // Create directories
+  /^touch [\w\/.@-]+$/,                 // Create empty files
+  /^cp [\w\/.@-]+ [\w\/.@-]+$/,        // Copy files
+  /^mv [\w\/.@-]+ [\w\/.@-]+$/,        // Move files (safe paths)
+  /^rm [\w\/.@-]+\.(tsx?|jsx?|css|json|md)$/, // Remove specific file types only
+  /^echo .+ >> [\w\/.@-]+$/,           // Append to files
+];
+
+/**
+ * Execute a command as an agent (with broader permissions)
+ */
+export async function executeAgentCommand(
+  containerId: string,
+  command: string,
+  options: {
+    timeout?: number;
+    workDir?: string;
+    env?: Record<string, string>;
+  } = {}
+): Promise<CommandResult & { agentApproved: boolean }> {
+  const { timeout = 60000, workDir = '/app', env = {} } = options;
+  const trimmedCommand = command.trim();
+  
+  // Check against blocked patterns first
+  for (const pattern of BLOCKED_PATTERNS) {
+    if (pattern.test(trimmedCommand)) {
+      return {
+        success: false,
+        stdout: '',
+        stderr: `Agent command rejected: Security violation`,
+        exitCode: -1,
+        executionTime: 0,
+        agentApproved: false,
+      };
+    }
+  }
+  
+  // Check against agent-allowed patterns
+  let isAllowed = false;
+  for (const pattern of AGENT_COMMAND_PATTERNS) {
+    if (pattern.test(trimmedCommand)) {
+      isAllowed = true;
+      break;
+    }
+  }
+  
+  if (!isAllowed) {
+    return {
+      success: false,
+      stdout: '',
+      stderr: `Agent command not in allowed list: ${trimmedCommand}`,
+      exitCode: -1,
+      executionTime: 0,
+      agentApproved: false,
+    };
+  }
+  
+  // Execute the command
+  const result = await executeCommand(containerId, command, { timeout, workDir, env });
+  
+  return {
+    ...result,
+    agentApproved: true,
+  };
+}
+
+/**
+ * Agent tool context for integration with chat
+ */
+export interface AgentToolContext {
+  containerId: string;
+  projectPath: string;
+  onProgress?: (step: {
+    type: 'terminal';
+    command: string;
+    status: 'running' | 'complete' | 'error';
+    output?: string;
+  }) => void;
+}
+
+/**
+ * Execute npm install for missing packages
+ */
+export async function installPackages(
+  ctx: AgentToolContext,
+  packages: string[]
+): Promise<CommandResult> {
+  const command = `npm install ${packages.join(' ')}`;
+  
+  ctx.onProgress?.({
+    type: 'terminal',
+    command,
+    status: 'running',
+  });
+  
+  const result = await executeAgentCommand(ctx.containerId, command, {
+    workDir: ctx.projectPath,
+  });
+  
+  ctx.onProgress?.({
+    type: 'terminal',
+    command,
+    status: result.success ? 'complete' : 'error',
+    output: result.success ? result.stdout : result.stderr,
+  });
+  
+  return result;
+}
+
+/**
+ * Run TypeScript type checking
+ */
+export async function runTypeCheck(
+  ctx: AgentToolContext
+): Promise<CommandResult> {
+  const command = 'npx tsc --noEmit';
+  
+  ctx.onProgress?.({
+    type: 'terminal',
+    command,
+    status: 'running',
+  });
+  
+  const result = await executeAgentCommand(ctx.containerId, command, {
+    workDir: ctx.projectPath,
+  });
+  
+  ctx.onProgress?.({
+    type: 'terminal',
+    command,
+    status: result.success ? 'complete' : 'error',
+    output: result.success ? 'No type errors found' : result.stderr,
+  });
+  
+  return result;
+}
+
+/**
+ * Run linting with auto-fix
+ */
+export async function runLint(
+  ctx: AgentToolContext,
+  fix: boolean = false
+): Promise<CommandResult> {
+  const command = fix ? 'npx eslint . --fix' : 'npx eslint .';
+  
+  ctx.onProgress?.({
+    type: 'terminal',
+    command,
+    status: 'running',
+  });
+  
+  const result = await executeAgentCommand(ctx.containerId, command, {
+    workDir: ctx.projectPath,
+  });
+  
+  ctx.onProgress?.({
+    type: 'terminal',
+    command,
+    status: result.success ? 'complete' : 'error',
+    output: result.success ? 'Lint passed' : result.stderr,
+  });
+  
+  return result;
+}

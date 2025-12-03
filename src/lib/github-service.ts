@@ -206,8 +206,15 @@ export class GitHubService {
       try {
         await git.push(['origin', 'master', '--force']);
       } catch {
-        // Create and push main branch
-        await git.checkoutLocalBranch('main');
+        // Ensure we're on main branch and push
+        const branches = await git.branchLocal();
+        if (!branches.all.includes('main')) {
+          // Create main branch only if it doesn't exist
+          await git.checkoutLocalBranch('main');
+        } else {
+          // Just checkout existing main branch
+          await git.checkout('main');
+        }
         await git.push(['origin', 'main', '--force', '--set-upstream']);
       }
     }

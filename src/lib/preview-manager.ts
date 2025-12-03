@@ -543,6 +543,9 @@ class PreviewManager {
     let workDir = '/app';
     let mountPath = '/app';
 
+    // Optimized install command - skip if node_modules exists, use npm ci if lock file exists
+    const fastInstall = '[ -d node_modules ] || ([ -f package-lock.json ] && npm ci --legacy-peer-deps 2>/dev/null || npm install --legacy-peer-deps 2>/dev/null)';
+
     if (isNextJs) {
       type = 'nextjs';
       // Check if custom sandbox image exists, otherwise use node:18-alpine
@@ -550,46 +553,46 @@ class PreviewManager {
       if (useCustomImage) {
         image = 'nextjs-sandbox:latest';
         // Use exec to ensure proper process management and signal handling
-        command = ['sh', '-c', 'cd /app/user-project && npm install --legacy-peer-deps 2>/dev/null; exec npm run dev'];
+        command = ['sh', '-c', `cd /app/user-project && ${fastInstall}; exec npm run dev`];
         workDir = '/app';
         mountPath = '/app/user-project';
       } else {
         image = 'node:18-alpine';
-        command = ['sh', '-c', 'npm install --legacy-peer-deps 2>/dev/null; exec npm run dev'];
+        command = ['sh', '-c', `${fastInstall}; exec npm run dev`];
         workDir = '/app';
         mountPath = '/app';
       }
-      startupTime = 30000;
+      startupTime = 20000; // Reduced from 30000 with optimized install
     } else if (isVue) {
       type = 'vue';
-      command = ['sh', '-c', 'npm install && npm run dev -- --host 0.0.0.0'];
+      command = ['sh', '-c', `${fastInstall}; exec npm run dev -- --host 0.0.0.0`];
       containerPort = 5173;
-      startupTime = 20000;
+      startupTime = 15000; // Reduced from 20000
     } else if (isAngular) {
       type = 'angular';
-      command = ['sh', '-c', 'npm install && npx ng serve --host 0.0.0.0 --disable-host-check'];
+      command = ['sh', '-c', `${fastInstall}; exec npx ng serve --host 0.0.0.0 --disable-host-check`];
       containerPort = 4200;
-      startupTime = 45000;
+      startupTime = 35000; // Reduced from 45000
     } else if (isSvelte) {
       type = 'svelte';
-      command = ['sh', '-c', 'npm install && npm run dev -- --host 0.0.0.0'];
+      command = ['sh', '-c', `${fastInstall}; exec npm run dev -- --host 0.0.0.0`];
       containerPort = 5173;
-      startupTime = 15000;
+      startupTime = 12000; // Reduced from 15000
     } else if (isVite) {
       type = 'vite';
-      command = ['sh', '-c', 'npm install && npm run dev -- --host 0.0.0.0'];
+      command = ['sh', '-c', `${fastInstall}; exec npm run dev -- --host 0.0.0.0`];
       containerPort = 5173;
-      startupTime = 15000;
+      startupTime = 12000; // Reduced from 15000
     } else if (isReact) {
       // React without Vite (create-react-app style)
       type = 'react';
-      command = ['sh', '-c', 'npm install && npm start'];
+      command = ['sh', '-c', `${fastInstall}; exec npm start`];
       containerPort = 3000;
-      startupTime = 30000;
+      startupTime = 25000; // Reduced from 30000
     } else if (isExpress) {
       type = 'express';
-      command = ['sh', '-c', 'npm install && npm start'];
-      startupTime = 10000;
+      command = ['sh', '-c', `${fastInstall}; exec npm start`];
+      startupTime = 8000; // Reduced from 10000
     } else {
       // Generic Node.js - try to detect the right start command
       const scripts = packageJson.scripts || {};
@@ -603,7 +606,7 @@ class PreviewManager {
         startCmd = 'npm run serve';
       }
       
-      command = ['sh', '-c', `npm install && ${startCmd}`];
+      command = ['sh', '-c', `${fastInstall}; exec ${startCmd}`];
     }
 
     return {
@@ -772,7 +775,7 @@ class PreviewManager {
     maxWaitTime: number
   ): Promise<void> {
     const startTime = Date.now();
-    const checkInterval = 2000;
+    const checkInterval = 1500; // Reduced from 2000ms for faster response
     
     const check = async () => {
       try {
@@ -787,10 +790,11 @@ class PreviewManager {
 
         try {
           const response = await fetch(`http://localhost:${port}`, {
-            signal: AbortSignal.timeout(1000)
+            signal: AbortSignal.timeout(800) // Reduced timeout for faster checks
           });
           
-          if (response.ok || response.status === 404) {
+          if (response.ok || response.status === 404 || response.status === 500) {
+            // 500 can mean the app is running but has an error - still "ready"
             await this.updateContainerStatus(projectId, 'running');
             console.log(`[PreviewManager] Preview container ${projectId} is now ready on port ${port}`);
             return;
@@ -811,7 +815,8 @@ class PreviewManager {
       }
     };
 
-    setTimeout(check, checkInterval);
+    // Start checking immediately instead of waiting for first interval
+    setTimeout(check, 500);
   }
 
   /**

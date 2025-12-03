@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-config';
 import { db } from '@/db';
-import { conversations, messages, projects } from '@/db/schema';
+import { conversations, messages, projects, users } from '@/db/schema';
 import { eq, desc } from 'drizzle-orm';
 import { anthropic } from '@ai-sdk/anthropic';
 import { streamText } from 'ai';
@@ -16,6 +16,14 @@ import {
   formatFileContextForModification 
 } from '@/lib/code-context';
 import { checkRateLimit, createRateLimitHeaders, getRateLimitIdentifier, RATE_LIMITS } from '@/lib/rate-limit';
+// Agent tools available for explicit user requests like "check for errors" or "run type check"
+// import { agentTools, AgentToolContext } from '@/lib/agent-tools';
+import {
+  buildMemoryLane,
+  buildSystemPrompt,
+  type ChatMode,
+  type ConversationMessage,
+} from '@/lib/chat-memory';
 
 // Detect intent from message
 function detectIntent(message: string): {
@@ -463,7 +471,8 @@ export async function POST(
       return NextResponse.json({ error: 'Invalid project ID' }, { status: 400 });
     }
 
-    const { message: userMessage, conversationId } = await request.json();
+    const { message: userMessage, conversationId, mode = 'agent' } = await request.json();
+    const chatMode: ChatMode = mode === 'chat' ? 'chat' : 'agent';
 
     if (!userMessage) {
       return NextResponse.json({ error: 'Message required' }, { status: 400 });
@@ -485,6 +494,14 @@ export async function POST(
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     }
 
+    // Get user's GitHub access token for pushing
+    const [user] = await db
+      .select({ githubAccessToken: users.githubAccessToken })
+      .from(users)
+      .where(eq(users.id, session.user.id))
+      .limit(1);
+    const githubAccessToken = user?.githubAccessToken || undefined;
+
     // Get or create conversation
     let conversation;
     if (conversationId) {
@@ -504,28 +521,55 @@ export async function POST(
       return NextResponse.json({ error: 'Conversation not found' }, { status: 404 });
     }
 
-    // Load conversation history (limit to last 6 for speed)
+    // Load conversation history (more for chat mode to build memory)
+    const historyLimit = chatMode === 'chat' ? 20 : 6;
     const history = await db
       .select()
       .from(messages)
       .where(eq(messages.conversationId, conversation.id))
       .orderBy(desc(messages.createdAt))
-      .limit(6);
+      .limit(historyLimit);
 
-    // Save user message (non-blocking)
+    // Build memory lane from conversation history for context
+    const conversationHistory: ConversationMessage[] = history.reverse().map(msg => ({
+      role: msg.role as 'user' | 'assistant',
+      content: msg.content,
+      timestamp: msg.createdAt,
+      metadata: msg.toolResults as { filesCreated?: string[] } | undefined,
+    }));
+    const memoryLane = buildMemoryLane(conversationHistory);
+
+    // Save user message with mode info (non-blocking)
     db.insert(messages).values({
       conversationId: conversation.id,
       role: 'user',
       content: userMessage,
+      toolResults: JSON.stringify({ mode: chatMode }),
     }).then(() => {}).catch(console.error);
 
     // Detect intent and target file
     const intent = detectIntent(userMessage);
 
+    // Create abort controller to handle client disconnection
+    const abortController = new AbortController();
+    let isAborted = false;
+
     // Create streaming response
     const encoder = new TextEncoder();
     let fullResponse = '';
     const createdFiles: string[] = [];
+
+    // Helper function to check if aborted before sending
+    const safeEnqueue = (controller: ReadableStreamDefaultController, data: string) => {
+      if (!isAborted) {
+        try {
+          controller.enqueue(encoder.encode(data));
+        } catch {
+          // Stream was closed
+          isAborted = true;
+        }
+      }
+    };
 
     // Helper function to send step updates
     const sendStep = (controller: ReadableStreamDefaultController, step: {
@@ -536,9 +580,7 @@ export async function POST(
       details?: string;
       icon?: string;
     }) => {
-      controller.enqueue(
-        encoder.encode(`data: ${JSON.stringify(step)}\n\n`)
-      );
+      safeEnqueue(controller, `data: ${JSON.stringify(step)}\n\n`);
     };
 
     const stream = new ReadableStream({
@@ -554,8 +596,7 @@ export async function POST(
           });
           
           await new Promise(resolve => setTimeout(resolve, 400)); // Small delay for UX
-          
-          // Determine the agent type description and icon
+                    // Determine the agent type description and icon
           const agentInfo: Record<string, { desc: string; icon: string }> = {
             'generate': { desc: 'Creating new components', icon: '✨' },
             'modify': { desc: 'Modifying existing code', icon: '📝' },
@@ -716,14 +757,17 @@ export async function POST(
           }
 
           // Step 3: Generating code / Thinking
-          const systemPrompt = getSystemPrompt(intent.type, hasContext);
+          // Use mode-based system prompt with memory context
+          const systemPrompt = chatMode === 'chat' 
+            ? buildSystemPrompt('chat', memoryLane)
+            : getSystemPrompt(intent.type, hasContext);
           
           sendStep(controller, {
             type: 'step',
             step: 'thinking',
             status: 'start',
-            message: 'AI is reasoning...',
-            details: 'Formulating the best approach',
+            message: chatMode === 'chat' ? 'Thinking about your requirements...' : 'AI is reasoning...',
+            details: chatMode === 'chat' ? 'Planning mode active' : 'Formulating the best approach',
             icon: '🤔'
           });
 
@@ -745,26 +789,39 @@ export async function POST(
           // Short delay to show thinking step
           await new Promise(resolve => setTimeout(resolve, 300));
 
+          // Check if aborted before AI call
+          if (isAborted) {
+            controller.close();
+            return;
+          }
+
           // Step 4: Streaming response
           sendStep(controller, {
             type: 'step',
             step: 'generating',
             status: 'start',
-            message: 'Generating code...',
-            details: 'Writing optimized, production-ready code',
-            icon: '✨'
+            message: chatMode === 'chat' ? 'Preparing response...' : 'Generating code...',
+            details: chatMode === 'chat' ? 'Analyzing your requirements' : 'Writing optimized, production-ready code',
+            icon: chatMode === 'chat' ? '💬' : '✨'
           });
 
-          // Stream from Claude using Vercel AI SDK
+          // Stream from Claude using Vercel AI SDK with abort signal
           const result = streamText({
             model: anthropic('claude-sonnet-4-20250514'),
             system: systemPrompt,
             messages: conversationMessages,
+            abortSignal: abortController.signal,
           });
 
           // Stream text chunks as they arrive
           let isFirstChunk = true;
           for await (const chunk of (await result).textStream) {
+            // Check if client disconnected
+            if (isAborted) {
+              console.log('🛑 Client disconnected, stopping generation');
+              break;
+            }
+
             if (isFirstChunk) {
               sendStep(controller, {
                 type: 'step',
@@ -777,9 +834,15 @@ export async function POST(
             }
             
             fullResponse += chunk;
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify({ type: 'text', content: chunk })}\n\n`)
-            );
+            safeEnqueue(controller, `data: ${JSON.stringify({ type: 'text', content: chunk })}\n\n`);
+          }
+
+          // If aborted during generation, close stream
+          if (isAborted) {
+            try {
+              controller.close();
+            } catch {}
+            return;
           }
 
           sendStep(controller, {
@@ -926,7 +989,7 @@ export async function POST(
                 const commitMessage = `AI: ${createdFiles.length === 1 
                   ? `Updated ${createdFiles[0]}` 
                   : `Updated ${createdFiles.length} files`}`;
-                await gitManager.commit(projectPath, commitMessage);
+                await gitManager.commit(projectPath, commitMessage, session.user.email || undefined, session.user.name || undefined);
 
                 sendStep(controller, {
                   type: 'step',
@@ -935,6 +998,20 @@ export async function POST(
                   message: 'Changes committed successfully',
                   icon: '✅'
                 });
+
+                // Push to GitHub in background (non-blocking) if user has access token
+                if (githubAccessToken) {
+                  sendStep(controller, {
+                    type: 'step',
+                    step: 'pushing',
+                    status: 'complete',
+                    message: 'Pushing to GitHub (background)...',
+                    icon: '☁️'
+                  });
+
+                  // Fire and forget - push happens async
+                  gitManager.pushAsync(projectPath, githubAccessToken);
+                }
               } catch (commitErr) {
                 console.error('Auto-commit error:', commitErr);
                 sendStep(controller, {
@@ -946,6 +1023,11 @@ export async function POST(
                   icon: '⚠️'
                 });
               }
+
+              // NOTE: Auto-validation disabled - it was blocking preview and slowing down responses.
+              // The terminal agent should be invoked explicitly by the user when they encounter errors,
+              // not automatically on every code generation. This keeps the response flow fast.
+              // To manually trigger validation, users can ask: "check for errors" or "run type check"
 
             } else {
               sendStep(controller, {
@@ -969,34 +1051,57 @@ export async function POST(
             icon: '🎉'
           });
 
-          // Save assistant message (non-blocking)
+          // Save assistant message with mode info (non-blocking)
           db.insert(messages).values({
             conversationId: conversation.id,
             role: 'assistant',
             content: fullResponse,
             toolCalls: createdFiles.length > 0 ? [{ files: createdFiles }] : null,
+            toolResults: JSON.stringify({ 
+              mode: chatMode, 
+              filesCreated: createdFiles 
+            }),
           }).then(() => {}).catch(console.error);
 
+          // Send updated requirements if in chat mode
+          if (chatMode === 'chat' && memoryLane.requirements) {
+            safeEnqueue(controller, `data: ${JSON.stringify({
+              type: 'requirements_updated',
+              requirements: memoryLane.requirements,
+            })}\n\n`);
+          }
+
           // Send completion
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify({
-              type: 'done',
-              conversationId: conversation.id,
-              filesCreated: createdFiles.length,
-            })}\n\n`)
-          );
+          safeEnqueue(controller, `data: ${JSON.stringify({
+            type: 'done',
+            conversationId: conversation.id,
+            filesCreated: createdFiles.length,
+            mode: chatMode,
+            requirements: memoryLane.requirements,
+          })}\n\n`);
 
           controller.close();
         } catch (error: unknown) {
-          console.error('Stream error:', error);
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify({
+          // Don't log abort errors as they're expected
+          if (error instanceof Error && error.name !== 'AbortError') {
+            console.error('Stream error:', error);
+          }
+          if (!isAborted) {
+            safeEnqueue(controller, `data: ${JSON.stringify({
               type: 'error',
               error: error instanceof Error ? error.message : 'Unknown error',
-            })}\n\n`)
-          );
-          controller.close();
+            })}\n\n`);
+          }
+          try {
+            controller.close();
+          } catch {}
         }
+      },
+      cancel() {
+        // Called when client disconnects/aborts
+        console.log('🛑 Client disconnected, aborting AI generation');
+        isAborted = true;
+        abortController.abort();
       },
     });
 

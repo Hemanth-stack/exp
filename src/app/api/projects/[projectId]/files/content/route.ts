@@ -135,7 +135,7 @@ export async function PUT(
     await fs.writeFile(fullPath, content, 'utf-8');
 
     // Auto-commit and push the changes
-    let syncResult = { committed: false, pushed: false };
+    const syncResult = { committed: false, pushed: false };
     try {
       // Get user's GitHub token for push
       const [user] = await db
@@ -147,22 +147,18 @@ export async function PUT(
       if (user?.githubAccessToken) {
         const commitMessage = `Updated file: ${filePath}`;
         
-        // Pass the GitHub URL if available, or let the git manager use existing remote
-        syncResult = await gitManager.commitAndPush(
-          repoPath, 
-          commitMessage,
-          user.githubAccessToken,
-          project.githubRepoUrl || undefined
-        );
+        // Commit first (synchronous)
+        await gitManager.commit(repoPath, commitMessage, session.user.email || undefined, session.user.name || undefined);
+        syncResult.committed = true;
         
-        if (syncResult.pushed) {
-          console.log(`[Files API] Pushed changes to GitHub for project ${projectId}`);
-        } else if (syncResult.committed) {
-          console.log(`[Files API] Committed changes locally for project ${projectId} (push failed or no remote)`);
-        }
+        // Push in background (non-blocking) for fast response
+        gitManager.pushAsync(repoPath, user.githubAccessToken, project.githubRepoUrl || undefined);
+        syncResult.pushed = true; // Optimistic - push is happening async
+        
+        console.log(`[Files API] Committed and queued push for project ${projectId}`);
       } else {
         // Just commit locally if no GitHub token
-        await gitManager.commit(repoPath, `Updated file: ${filePath}`);
+        await gitManager.commit(repoPath, `Updated file: ${filePath}`, session.user.email || undefined, session.user.name || undefined);
         syncResult.committed = true;
         console.log(`[Files API] Committed changes locally (no GitHub token)`);
       }

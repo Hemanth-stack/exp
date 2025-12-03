@@ -8,6 +8,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { useToast } from '@/components/ui/use-toast';
 import { FileExplorer } from '@/components/file-explorer';
 import { AgentProgress, type AgentStep } from '@/components/AgentProgress';
+import { SandboxTerminal } from '@/components/SandboxTerminal';
 import { 
   ArrowLeft, 
   Send, 
@@ -30,10 +31,14 @@ import {
   GitBranch,
   ChevronUp,
   RefreshCcw,
+  Terminal,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import Link from 'next/link';
+
+// Chat Mode type
+type ChatMode = 'chat' | 'agent';
 
 interface Message {
   id: string;
@@ -43,6 +48,7 @@ interface Message {
   filesCreated?: string[];  // Track files created by this message
   isCodeResponse?: boolean; // Flag for responses that generated code
   error?: boolean; // Flag for error responses
+  mode?: ChatMode; // Track which mode the message was sent in
 }
 
 interface GitCommit {
@@ -121,6 +127,8 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
     framework: string;
     gitRepoPath?: string;
     status: string;
+    containerId?: string;
+    containerPort?: number;
   } | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -138,10 +146,11 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
   const [deploymentUrl, setDeploymentUrl] = useState<string | null>(null);
   
   // New states for toggle view and VS Code-like editing
-  const [viewMode, setViewMode] = useState<'preview' | 'code'>('preview');
+  const [viewMode, setViewMode] = useState<'preview' | 'code' | 'terminal'>('preview');
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [terminalSessionId, setTerminalSessionId] = useState<string | null>(null);
   
   // Git history states
   const [showGitHistory, setShowGitHistory] = useState(false);
@@ -157,6 +166,9 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
   // Agent progress states
   const [agentSteps, setAgentSteps] = useState<AgentStep[]>([]);
   const [agentProgressCollapsed, setAgentProgressCollapsed] = useState(false);
+  
+  // Chat mode state
+  const [chatMode, setChatMode] = useState<ChatMode>('chat');
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -696,6 +708,7 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
       role: 'user',
       content: userMessage,
       createdAt: new Date(),
+      mode: chatMode,
     };
 
     setMessages(prev => [...prev, newMessage]);
@@ -708,7 +721,8 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           message: userMessage,
-          conversationId: conversationId 
+          conversationId: conversationId,
+          mode: chatMode,
         }),
         signal: abortControllerRef.current.signal,
       });
@@ -971,40 +985,42 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
         {/* Left Panel - Chat (30%) */}
         <div className="border-r bg-card" style={{ width: '30%' }}>
           <div className="h-full flex flex-col">
-            <div className="p-3 border-b flex items-center justify-between">
-              <h2 className="font-semibold">AI Assistant</h2>
-              <div className="flex items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setShowGitHistory(!showGitHistory);
-                    if (!showGitHistory) {
-                      fetchGitCommits();
-                    }
-                  }}
-                  className="h-8 px-2"
-                  title="View commit history"
-                >
-                  <History className="h-4 w-4" />
-                </Button>
-                {githubStatus.isConnected ? (
-                  githubStatus.repoUrl ? (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={handleSyncToGitHub}
-                      disabled={isSyncingToGithub}
-                      className="h-8 px-2"
-                      title="Sync to GitHub"
-                    >
-                      {isSyncingToGithub ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <RefreshCw className="h-4 w-4" />
-                      )}
-                    </Button>
-                  ) : (
+            {/* Chat Header with Mode Toggle */}
+            <div className="p-3 border-b">
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="font-semibold">AI Assistant</h2>
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setShowGitHistory(!showGitHistory);
+                      if (!showGitHistory) {
+                        fetchGitCommits();
+                      }
+                    }}
+                    className="h-8 px-2"
+                    title="View commit history"
+                  >
+                    <History className="h-4 w-4" />
+                  </Button>
+                  {githubStatus.isConnected ? (
+                    githubStatus.repoUrl ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleSyncToGitHub}
+                        disabled={isSyncingToGithub}
+                        className="h-8 px-2"
+                        title="Sync to GitHub"
+                      >
+                        {isSyncingToGithub ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-4 w-4" />
+                        )}
+                      </Button>
+                    ) : (
                     <Button
                       variant="ghost"
                       size="sm"
@@ -1021,6 +1037,7 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                     </Button>
                   )
                 ) : null}
+                </div>
               </div>
             </div>
             
@@ -1107,9 +1124,46 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                     <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                   </div>
                 ) : messages.length === 0 ? (
-                  <div className="text-center text-muted-foreground py-8">
-                    <p className="mb-2">No messages yet</p>
-                    <p className="text-sm">Ask AI to help you build your app!</p>
+                  <div className="text-center text-muted-foreground py-8 space-y-4">
+                    {chatMode === 'chat' ? (
+                      <>
+                        <div className="text-4xl">💬</div>
+                        <div>
+                          <p className="font-medium text-foreground">Chat Mode</p>
+                          <p className="text-sm mt-1">Tell me what you want to build</p>
+                        </div>
+                        <div className="flex flex-wrap justify-center gap-2 pt-2">
+                          {['Personal blog', 'Portfolio', 'Landing page', 'Dashboard'].map((suggestion) => (
+                            <button
+                              key={suggestion}
+                              onClick={() => setInputValue(`I want to build a ${suggestion.toLowerCase()}`)}
+                              className="text-xs px-3 py-1.5 rounded-full bg-muted hover:bg-muted/80 transition-colors"
+                            >
+                              {suggestion}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="text-4xl">🛠️</div>
+                        <div>
+                          <p className="font-medium text-foreground">Build Mode</p>
+                          <p className="text-sm mt-1">Tell me what to implement</p>
+                        </div>
+                        <div className="flex flex-wrap justify-center gap-2 pt-2">
+                          {['Create homepage', 'Add navigation', 'Build contact form', 'Add dark mode'].map((suggestion) => (
+                            <button
+                              key={suggestion}
+                              onClick={() => setInputValue(suggestion)}
+                              className="text-xs px-3 py-1.5 rounded-full bg-muted hover:bg-muted/80 transition-colors"
+                            >
+                              {suggestion}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
                   </div>
                 ) : (
                   messages.map((message, index) => (
@@ -1220,8 +1274,9 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
             </ScrollArea>
 
             <div className="p-4 border-t">
-              <div className="flex gap-2 items-end">
-                <div className="flex-1 relative">
+              <div className="flex gap-3">
+                {/* Left: Input textarea */}
+                <div className="flex-1">
                   <textarea
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
@@ -1231,42 +1286,69 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                         handleSendMessage();
                       }
                     }}
-                    placeholder="Ask AI to build features... (Shift+Enter for new line)"
+                    placeholder={chatMode === 'chat' 
+                      ? "What do you want to build?"
+                      : "What should I implement?"
+                    }
                     disabled={isStreaming}
-                    className="w-full min-h-[44px] max-h-[200px] resize-none px-3 py-2 text-sm rounded-md border border-input bg-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                    style={{ height: 'auto' }}
-                    rows={1}
-                    onInput={(e) => {
-                      const target = e.target as HTMLTextAreaElement;
-                      target.style.height = 'auto';
-                      target.style.height = Math.min(target.scrollHeight, 200) + 'px';
-                    }}
+                    className="w-full h-full min-h-[76px] max-h-[200px] resize-none px-3 py-2 text-sm rounded-lg border border-input bg-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                    rows={2}
                   />
                 </div>
-                {isStreaming ? (
-                  <Button
-                    onClick={() => {
-                      abortControllerRef.current?.abort();
-                      setIsStreaming(false);
-                      setCurrentMessage('');
-                    }}
-                    variant="destructive"
-                    size="icon"
-                    className="shrink-0"
-                  >
-                    <Square className="h-4 w-4" />
-                  </Button>
-                ) : (
-                  <Button
-                    onClick={handleSendMessage}
-                    disabled={!inputValue.trim()}
-                    size="icon"
-                    className="shrink-0"
-                    data-send-button="true"
-                  >
-                    <Send className="h-4 w-4" />
-                  </Button>
-                )}
+                
+                {/* Right: Symmetric controls */}
+                <div className="flex flex-col gap-1.5 w-[72px]">
+                  {/* Mode Switch - matches button width */}
+                  <div className="relative flex items-center bg-muted rounded-lg p-0.5 h-9">
+                    <div 
+                      className={`absolute h-8 w-[34px] bg-primary rounded-md transition-transform duration-200 ease-out ${
+                        chatMode === 'agent' ? 'translate-x-[34px]' : 'translate-x-0'
+                      }`}
+                    />
+                    <button
+                      onClick={() => setChatMode('chat')}
+                      className={`relative z-10 flex-1 h-8 flex items-center justify-center text-sm transition-colors duration-200 rounded-md ${
+                        chatMode === 'chat' ? 'text-primary-foreground' : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                      title="Chat - Plan your project"
+                    >
+                      💬
+                    </button>
+                    <button
+                      onClick={() => setChatMode('agent')}
+                      className={`relative z-10 flex-1 h-8 flex items-center justify-center text-sm transition-colors duration-200 rounded-md ${
+                        chatMode === 'agent' ? 'text-primary-foreground' : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                      title="Build - Generate code"
+                    >
+                      🤖
+                    </button>
+                  </div>
+                  
+                  {/* Send/Stop Button - full width */}
+                  {isStreaming ? (
+                    <Button
+                      onClick={() => {
+                        abortControllerRef.current?.abort();
+                        setIsStreaming(false);
+                        setCurrentMessage('');
+                      }}
+                      variant="destructive"
+                      className="w-full h-9"
+                    >
+                      <Square className="h-4 w-4" />
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={handleSendMessage}
+                      disabled={!inputValue.trim()}
+                      className="w-full h-9"
+                      data-send-button="true"
+                    >
+                      <Send className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
               </div>
               <p className="text-xs text-muted-foreground mt-2">
                 {isStreaming ? '⏳ Generating... Click stop button to cancel' : '💡 Tip: Ask to create/edit multiple files at once'}
@@ -1300,6 +1382,15 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                   >
                     <Code className="h-4 w-4" />
                     Code Editor
+                  </Button>
+                  <Button
+                    variant={viewMode === 'terminal' ? 'default' : 'ghost'}
+                    size="sm"
+                    onClick={() => setViewMode('terminal')}
+                    className="gap-2"
+                  >
+                    <Terminal className="h-4 w-4" />
+                    Terminal
                   </Button>
                 </div>
 
@@ -1409,6 +1500,42 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                           Start Preview
                         </Button>
                       )}
+                    </div>
+                  )}
+                </div>
+              ) : viewMode === 'terminal' ? (
+                /* Terminal View */
+                <div className="h-full bg-zinc-950">
+                  {project?.containerId ? (
+                    <SandboxTerminal
+                      sessionId={terminalSessionId || project.containerId}
+                      className="h-full rounded-none"
+                      onError={(error) => {
+                        toast({
+                          title: 'Terminal Error',
+                          description: error,
+                          variant: 'destructive',
+                        });
+                      }}
+                    />
+                  ) : (
+                    <div className="h-full flex items-center justify-center text-zinc-400">
+                      <div className="text-center space-y-4">
+                        <Terminal className="h-12 w-12 mx-auto opacity-50" />
+                        <p>Start the preview to enable terminal access</p>
+                        <Button
+                          variant="outline"
+                          onClick={startPreview}
+                          disabled={previewStatus === 'starting'}
+                        >
+                          {previewStatus === 'starting' ? (
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          ) : (
+                            <Play className="h-4 w-4 mr-2" />
+                          )}
+                          Start Preview
+                        </Button>
+                      </div>
                     </div>
                   )}
                 </div>

@@ -6,8 +6,9 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Loader2, RefreshCw, X, AlertCircle, CheckCircle } from 'lucide-react';
+import { Loader2, RefreshCw, X, AlertCircle, CheckCircle, Terminal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { SandboxTerminal } from '@/components/SandboxTerminal';
 
 interface DockerSandboxPreviewProps {
   code: string;
@@ -37,6 +38,7 @@ export function DockerSandboxPreview({
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [previewReady, setPreviewReady] = useState(false);
+  const [activeTab, setActiveTab] = useState<'preview' | 'terminal'>('preview');
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const healthCheckInterval = useRef<NodeJS.Timeout | null>(null);
   const previewCheckInterval = useRef<NodeJS.Timeout | null>(null);
@@ -76,8 +78,12 @@ export function DockerSandboxPreview({
     setPreviewReady(false);
     addLog('Waiting for preview service to be available...');
 
-    // Check every 1.5 seconds
+    let checkCount = 0;
+    const maxChecks = 60; // Max 60 seconds of checking
+
+    // Check every 1 second (reduced from 1.5s for faster response)
     previewCheckInterval.current = setInterval(async () => {
+      checkCount++;
       const isAvailable = await checkPreviewAvailability(sessionId);
       if (isAvailable) {
         addLog('Preview service is ready!');
@@ -86,8 +92,15 @@ export function DockerSandboxPreview({
           clearInterval(previewCheckInterval.current);
           previewCheckInterval.current = null;
         }
+      } else if (checkCount >= maxChecks) {
+        // Stop checking after timeout
+        if (previewCheckInterval.current) {
+          clearInterval(previewCheckInterval.current);
+          previewCheckInterval.current = null;
+        }
+        addLog('Preview check timed out - container may still be starting');
       }
-    }, 1500);
+    }, 1000);
 
     // Also check immediately
     checkPreviewAvailability(sessionId).then((isAvailable) => {
@@ -401,7 +414,7 @@ export function DockerSandboxPreview({
         )}
 
         {/* Preview iframe - Only show when preview is ready */}
-        {sandboxInfo && status === 'healthy' && previewReady && (
+        {sandboxInfo && status === 'healthy' && previewReady && activeTab === 'preview' && (
           <iframe
             ref={iframeRef}
             src={`/api/sandbox/preview?sessionId=${sandboxInfo.sessionId}&path=/`}
@@ -410,7 +423,45 @@ export function DockerSandboxPreview({
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
           />
         )}
+
+        {/* Terminal Tab - Available as soon as sandbox exists */}
+        {sandboxInfo && activeTab === 'terminal' && (
+          <div className="absolute inset-0 overflow-hidden z-20">
+            <SandboxTerminal 
+              sessionId={sandboxInfo.sessionId} 
+              className="h-full rounded-none border-0"
+              onError={(err) => addLog(`Terminal error: ${err}`)}
+            />
+          </div>
+        )}
       </div>
+
+      {/* Tab Bar - Show as soon as sandbox exists */}
+      {sandboxInfo && (
+        <div className="border-t bg-gray-100 px-2 py-1 flex gap-1">
+          <button
+            onClick={() => setActiveTab('preview')}
+            className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
+              activeTab === 'preview' 
+                ? 'bg-white text-gray-900 shadow-sm' 
+                : 'text-gray-600 hover:text-gray-900 hover:bg-white/50'
+            }`}
+          >
+            Preview
+          </button>
+          <button
+            onClick={() => setActiveTab('terminal')}
+            className={`px-3 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1 ${
+              activeTab === 'terminal' 
+                ? 'bg-zinc-900 text-zinc-100 shadow-sm' 
+                : 'text-gray-600 hover:text-gray-900 hover:bg-white/50'
+            }`}
+          >
+            <Terminal className="h-3 w-3" />
+            Terminal
+          </button>
+        </div>
+      )}
 
       {/* Logs Panel */}
       {logs.length > 0 && (

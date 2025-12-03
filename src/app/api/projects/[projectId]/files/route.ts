@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth-config';
 import { db } from '@/db';
-import { projects } from '@/db/schema';
+import { projects, users } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import fs from 'fs/promises';
 import path from 'path';
@@ -235,6 +235,14 @@ export async function POST(
       return NextResponse.json({ error: 'Project repository not initialized' }, { status: 400 });
     }
 
+    // Get user's GitHub access token for pushing
+    const [user] = await db
+      .select({ githubAccessToken: users.githubAccessToken })
+      .from(users)
+      .where(eq(users.id, session.user.id))
+      .limit(1);
+    const githubAccessToken = user?.githubAccessToken || undefined;
+
     // Normalize the repo path for Docker environment
     const repoPath = normalizeRepoPath(project.gitRepoPath);
 
@@ -258,15 +266,20 @@ export async function POST(
       await fs.writeFile(fullPath, sanitizeContent(content) || '');
     }
 
-    // Auto-commit the changes
+    // Auto-commit and push the changes
     try {
       const commitMessage = type === 'directory' 
         ? `Created directory: ${relativePath}` 
         : `Created file: ${relativePath}`;
-      await gitManager.commit(repoPath, commitMessage);
+      await gitManager.commit(repoPath, commitMessage, session.user.email || undefined, session.user.name || undefined);
+      
+      // Push to GitHub in background (non-blocking)
+      if (githubAccessToken) {
+        gitManager.pushAsync(repoPath, githubAccessToken);
+      }
     } catch (commitErr) {
-      console.error('Auto-commit error:', commitErr);
-      // Don't fail the request if commit fails
+      console.error('Auto-commit/push error:', commitErr);
+      // Don't fail the request if commit/push fails
     }
 
     return NextResponse.json({ success: true });
@@ -319,6 +332,14 @@ export async function PUT(
       return NextResponse.json({ error: 'Project repository not initialized' }, { status: 400 });
     }
 
+    // Get user's GitHub access token for pushing
+    const [user] = await db
+      .select({ githubAccessToken: users.githubAccessToken })
+      .from(users)
+      .where(eq(users.id, session.user.id))
+      .limit(1);
+    const githubAccessToken = user?.githubAccessToken || undefined;
+
     // Normalize the repo path for Docker environment
     const repoPath = normalizeRepoPath(project.gitRepoPath);
 
@@ -332,13 +353,18 @@ export async function PUT(
 
     await fs.rename(fullOldPath, fullNewPath);
 
-    // Auto-commit the rename
+    // Auto-commit and push the rename
     try {
       const commitMessage = `Renamed: ${oldPath} → ${newPath}`;
-      await gitManager.commit(repoPath, commitMessage);
+      await gitManager.commit(repoPath, commitMessage, session.user.email || undefined, session.user.name || undefined);
+      
+      // Push to GitHub in background (non-blocking)
+      if (githubAccessToken) {
+        gitManager.pushAsync(repoPath, githubAccessToken);
+      }
     } catch (commitErr) {
-      console.error('Auto-commit error:', commitErr);
-      // Don't fail the request if commit fails
+      console.error('Auto-commit/push error:', commitErr);
+      // Don't fail the request if commit/push fails
     }
 
     return NextResponse.json({ success: true });
@@ -395,6 +421,14 @@ export async function DELETE(
       return NextResponse.json({ error: 'Project repository not initialized' }, { status: 400 });
     }
 
+    // Get user's GitHub access token for pushing
+    const [user] = await db
+      .select({ githubAccessToken: users.githubAccessToken })
+      .from(users)
+      .where(eq(users.id, session.user.id))
+      .limit(1);
+    const githubAccessToken = user?.githubAccessToken || undefined;
+
     // Normalize the repo path for Docker environment
     const repoPath = normalizeRepoPath(project.gitRepoPath);
 
@@ -411,15 +445,20 @@ export async function DELETE(
       await fs.unlink(fullPath);
     }
 
-    // Auto-commit the deletion
+    // Auto-commit and push the deletion
     try {
       const commitMessage = stat.isDirectory() 
         ? `Deleted directory: ${filePath}` 
         : `Deleted file: ${filePath}`;
-      await gitManager.commit(repoPath, commitMessage);
+      await gitManager.commit(repoPath, commitMessage, session.user.email || undefined, session.user.name || undefined);
+      
+      // Push to GitHub in background (non-blocking)
+      if (githubAccessToken) {
+        gitManager.pushAsync(repoPath, githubAccessToken);
+      }
     } catch (commitErr) {
-      console.error('Auto-commit error:', commitErr);
-      // Don't fail the request if commit fails
+      console.error('Auto-commit/push error:', commitErr);
+      // Don't fail the request if commit/push fails
     }
 
     return NextResponse.json({ success: true });

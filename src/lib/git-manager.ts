@@ -1,4 +1,4 @@
-import simpleGit from 'simple-git';
+import simpleGit, { SimpleGit } from 'simple-git';
 import path from 'path';
 import fs from 'fs/promises';
 
@@ -6,6 +6,128 @@ import fs from 'fs/promises';
 const REPOS_DIR = process.env.NODE_ENV === 'production' 
   ? '/app/user-repos'
   : path.join(process.cwd(), 'user-repos');
+
+// Default git identity for automated commits
+const DEFAULT_GIT_EMAIL = 'builder@appbuilder.local';
+const DEFAULT_GIT_NAME = 'App Builder';
+
+// Default .gitignore content for projects
+const DEFAULT_GITIGNORE = `# Dependencies
+node_modules/
+.pnp
+.pnp.js
+.yarn/
+
+# Testing
+coverage/
+
+# Next.js
+.next/
+out/
+build/
+dist/
+
+# Misc
+.DS_Store
+*.pem
+Thumbs.db
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+.eslintcache
+
+# Local env files
+.env*.local
+.env
+.env.development
+.env.production
+
+# Vercel
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+`;
+
+/**
+ * Ensures .gitignore exists in the repository
+ * Creates one with defaults if missing
+ */
+async function ensureGitIgnore(repoPath: string): Promise<boolean> {
+  const gitignorePath = path.join(repoPath, '.gitignore');
+  
+  try {
+    await fs.access(gitignorePath);
+    // .gitignore exists
+    return false;
+  } catch {
+    // .gitignore doesn't exist, create it
+    try {
+      await fs.writeFile(gitignorePath, DEFAULT_GITIGNORE, 'utf-8');
+      console.log(`[GitManager] Created .gitignore in ${repoPath}`);
+      return true;
+    } catch (err) {
+      console.error('[GitManager] Failed to create .gitignore:', err);
+      return false;
+    }
+  }
+}
+
+/**
+ * Ensures git identity is configured for a repository
+ * This prevents "Author identity unknown" errors in containers
+ */
+async function ensureGitIdentity(git: SimpleGit, userEmail?: string, userName?: string): Promise<void> {
+  const emailToUse = userEmail || DEFAULT_GIT_EMAIL;
+  const nameToUse = userName || DEFAULT_GIT_NAME;
+  
+  try {
+    // First check global config
+    const globalEmail = await git.getConfig('user.email', 'global').catch(() => null);
+    const globalName = await git.getConfig('user.name', 'global').catch(() => null);
+    
+    // If global config exists, we're good
+    if (globalEmail?.value && globalName?.value) {
+      return;
+    }
+    
+    // Try to set local config for this repo
+    try {
+      await git.addConfig('user.email', emailToUse, false, 'local');
+      await git.addConfig('user.name', nameToUse, false, 'local');
+    } catch {
+      // If local config fails (e.g., not a git repo yet), set global
+      console.log('[GitManager] Setting global git identity config');
+      await git.addConfig('user.email', emailToUse, false, 'global');
+      await git.addConfig('user.name', nameToUse, false, 'global');
+    }
+  } catch (error) {
+    // Ultimate fallback: try to set global config
+    console.log('[GitManager] Fallback: Setting global git identity config');
+    try {
+      await git.addConfig('user.email', emailToUse, false, 'global');
+      await git.addConfig('user.name', nameToUse, false, 'global');
+    } catch (globalError) {
+      console.error('[GitManager] Failed to set git identity:', globalError);
+    }
+  }
+}
 
 /**
  * Validates that a repository path is safe and within allowed directories
@@ -321,13 +443,15 @@ export class GitManager {
     const templatePath = path.join(process.cwd(), 'templates', template);
     await this.copyTemplate(templatePath, repoPath);
 
+    // Ensure .gitignore exists (in case template doesn't have one)
+    await ensureGitIgnore(repoPath);
+
     // Initialize git with default user config
     const git = simpleGit(repoPath);
     await git.init();
     
-    // Set local git config for this repo to avoid "Author identity unknown" error
-    await git.addConfig('user.email', 'builder@appbuilder.local', false, 'local');
-    await git.addConfig('user.name', 'App Builder', false, 'local');
+    // Ensure git identity is configured
+    await ensureGitIdentity(git);
     
     await git.add('.');
     await git.commit('Initial commit');
@@ -375,83 +499,89 @@ export class GitManager {
     return await git.status();
   }
 
-  async commit(repoPath: string, message: string): Promise<void> {
+  async commit(repoPath: string, message: string, userEmail?: string, userName?: string): Promise<void> {
     const git = simpleGit(repoPath);
+    
+    // Ensure .gitignore exists to avoid committing node_modules etc
+    await ensureGitIgnore(repoPath);
+    
+    // Ensure git identity is configured before commit
+    await ensureGitIdentity(git, userEmail, userName);
+    
     await git.add('.');
     await git.commit(message);
   }
 
   /**
-   * Push changes to remote (GitHub)
+   * Push changes to remote (GitHub) - optimized for speed
+   * @param timeout - max time to wait for push (default 10 seconds)
    */
-  async push(repoPath: string, accessToken?: string, repoUrl?: string): Promise<boolean> {
+  async push(repoPath: string, accessToken?: string, repoUrl?: string, timeout: number = 10000): Promise<boolean> {
     const git = simpleGit(repoPath);
     
     try {
-      // Check if remote exists
-      const remotes = await git.getRemotes(true);
-      const origin = remotes.find(r => r.name === 'origin');
+      // Quick check if remote exists
+      const remotes = await git.getRemotes(false);
+      const hasOrigin = remotes.some(r => r.name === 'origin');
       
-      if (!origin) {
+      if (!hasOrigin && !repoUrl) {
         console.log('[GitManager] No remote configured, skipping push');
         return false;
       }
 
-      // Get the current remote URL if repoUrl not provided
-      let remoteUrlToUse = repoUrl;
-      if (!remoteUrlToUse && origin.refs?.push) {
-        remoteUrlToUse = origin.refs.push;
-        console.log('[GitManager] Using existing remote URL:', remoteUrlToUse);
-      }
-
-      // If accessToken provided, update remote URL with auth
-      if (accessToken && remoteUrlToUse) {
-        const parsed = parseGitHubUrl(remoteUrlToUse);
-        if (parsed.isValid) {
-          const authUrl = `https://${accessToken}@github.com/${parsed.owner}/${parsed.repo}.git`;
-          await git.remote(['set-url', 'origin', authUrl]);
-          console.log('[GitManager] Updated remote URL with auth token');
+      // Set up auth URL if token provided
+      if (accessToken) {
+        let urlToParse = repoUrl;
+        if (!urlToParse) {
+          const remotesWithRefs = await git.getRemotes(true);
+          const origin = remotesWithRefs.find(r => r.name === 'origin');
+          urlToParse = origin?.refs?.push;
         }
-      } else if (accessToken && origin.refs?.push) {
-        // Try to parse from existing origin URL
-        const existingUrl = origin.refs.push;
-        const parsed = parseGitHubUrl(existingUrl);
-        if (parsed.isValid) {
-          const authUrl = `https://${accessToken}@github.com/${parsed.owner}/${parsed.repo}.git`;
-          await git.remote(['set-url', 'origin', authUrl]);
-          console.log('[GitManager] Updated remote URL with auth token from existing origin');
-        }
-      }
-
-      // Get current branch
-      const branchInfo = await git.branch();
-      const currentBranch = branchInfo.current || 'main';
-
-      // Push to remote
-      try {
-        await git.push(['origin', currentBranch]);
-        console.log(`[GitManager] Pushed changes to remote (${currentBranch})`);
-        return true;
-      } catch {
-        console.log('[GitManager] Push to current branch failed, trying alternatives...');
-        // Try pushing to main or master
-        try {
-          await git.push(['origin', 'main']);
-          return true;
-        } catch {
-          try {
-            await git.push(['origin', 'master']);
-            return true;
-          } catch (finalErr) {
-            console.error('[GitManager] All push attempts failed:', finalErr);
-            return false;
+        
+        if (urlToParse) {
+          const parsed = parseGitHubUrl(urlToParse);
+          if (parsed.isValid) {
+            const authUrl = `https://${accessToken}@github.com/${parsed.owner}/${parsed.repo}.git`;
+            await git.remote(['set-url', 'origin', authUrl]);
           }
         }
       }
+
+      // Get current branch (fast)
+      const branchSummary = await git.branchLocal();
+      const currentBranch = branchSummary.current || 'main';
+
+      // Push with timeout
+      const pushPromise = git.push(['origin', currentBranch, '--force-with-lease']);
+      const timeoutPromise = new Promise<never>((_, reject) => 
+        setTimeout(() => reject(new Error('Push timeout')), timeout)
+      );
+
+      await Promise.race([pushPromise, timeoutPromise]);
+      console.log(`[GitManager] Pushed to ${currentBranch}`);
+      return true;
     } catch (error) {
-      console.error('[GitManager] Push failed:', error);
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[GitManager] Push failed:', msg);
       return false;
     }
+  }
+
+  /**
+   * Push changes in background (fire-and-forget)
+   * Returns immediately, push happens asynchronously
+   */
+  pushAsync(repoPath: string, accessToken?: string, repoUrl?: string): void {
+    // Fire and forget - don't await
+    this.push(repoPath, accessToken, repoUrl, 30000).then(success => {
+      if (success) {
+        console.log('[GitManager] Background push completed');
+      } else {
+        console.log('[GitManager] Background push failed or skipped');
+      }
+    }).catch(err => {
+      console.error('[GitManager] Background push error:', err);
+    });
   }
 
   /**
@@ -461,9 +591,14 @@ export class GitManager {
     repoPath: string, 
     message: string, 
     accessToken?: string, 
-    repoUrl?: string
+    repoUrl?: string,
+    userEmail?: string,
+    userName?: string
   ): Promise<{ committed: boolean; pushed: boolean }> {
     const git = simpleGit(repoPath);
+    
+    // Ensure git identity is configured before commit
+    await ensureGitIdentity(git, userEmail, userName);
     
     // Check if there are changes
     const status = await git.status();
@@ -495,6 +630,120 @@ export class GitManager {
   async checkout(repoPath: string, branch: string): Promise<void> {
     const git = simpleGit(repoPath);
     await git.checkout(branch);
+  }
+
+  /**
+   * Auto-save: commit any pending changes with a timestamp message
+   * Used for automatic saves on inactivity or session close
+   */
+  async autoSave(
+    repoPath: string, 
+    userEmail?: string, 
+    userName?: string
+  ): Promise<{ hasChanges: boolean; committed: boolean }> {
+    const git = simpleGit(repoPath);
+    
+    // Ensure .gitignore exists to avoid committing node_modules etc
+    await ensureGitIgnore(repoPath);
+    
+    // Ensure git identity is configured
+    await ensureGitIdentity(git, userEmail, userName);
+    
+    // Check for changes
+    const status = await git.status();
+    if (status.files.length === 0) {
+      return { hasChanges: false, committed: false };
+    }
+
+    // Create auto-save commit message
+    const timestamp = new Date().toISOString();
+    const fileCount = status.files.length;
+    const message = `Auto-save: ${fileCount} file(s) updated at ${timestamp}`;
+
+    try {
+      await git.add('.');
+      await git.commit(message);
+      console.log(`[GitManager] Auto-saved ${fileCount} file(s)`);
+      return { hasChanges: true, committed: true };
+    } catch (error) {
+      console.error('[GitManager] Auto-save commit failed:', error);
+      return { hasChanges: true, committed: false };
+    }
+  }
+
+  /**
+   * Auto-push: push any unpushed commits to remote
+   * Used for automatic push on session close or inactivity timeout
+   */
+  async autoPush(
+    repoPath: string, 
+    accessToken?: string, 
+    repoUrl?: string
+  ): Promise<{ pushed: boolean; commitCount: number }> {
+    const git = simpleGit(repoPath);
+    
+    try {
+      // Check if remote exists
+      const remotes = await git.getRemotes(true);
+      const origin = remotes.find(r => r.name === 'origin');
+      
+      if (!origin && !repoUrl) {
+        return { pushed: false, commitCount: 0 };
+      }
+
+      // Count unpushed commits
+      let commitCount = 0;
+      try {
+        const log = await git.log(['origin/main..HEAD']);
+        commitCount = log.total;
+      } catch {
+        // If this fails, there might be no upstream set - try to get all local commits
+        try {
+          const log = await git.log(['--not', '--remotes']);
+          commitCount = log.total;
+        } catch {
+          // Assume there are commits to push
+          commitCount = 1;
+        }
+      }
+
+      if (commitCount === 0) {
+        return { pushed: false, commitCount: 0 };
+      }
+
+      // Push
+      const pushed = await this.push(repoPath, accessToken, repoUrl);
+      console.log(`[GitManager] Auto-pushed ${commitCount} commit(s)`);
+      
+      return { pushed, commitCount };
+    } catch (error) {
+      console.error('[GitManager] Auto-push failed:', error);
+      return { pushed: false, commitCount: 0 };
+    }
+  }
+
+  /**
+   * Full auto-sync: commit pending changes and push to remote
+   * Called on session close or inactivity timeout
+   */
+  async autoSync(
+    repoPath: string, 
+    accessToken?: string, 
+    repoUrl?: string,
+    userEmail?: string,
+    userName?: string
+  ): Promise<{ committed: boolean; pushed: boolean; fileCount: number }> {
+    // First, auto-save any pending changes
+    const saveResult = await this.autoSave(repoPath, userEmail, userName);
+    
+    // Then, push all unpushed commits
+    const pushResult = await this.autoPush(repoPath, accessToken, repoUrl);
+    
+    return {
+      committed: saveResult.committed,
+      pushed: pushResult.pushed,
+      fileCount: saveResult.hasChanges ? (await simpleGit(repoPath).status()).files.length : 0,
+    };
   }
 }
 

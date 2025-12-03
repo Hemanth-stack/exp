@@ -1,15 +1,6 @@
 /**
  * Project Preview Proxy Route
- * Proxies requests to project preview containers to avoid CO            </div>
-          </body>
-        </html>`,
-        { status: 503, headers: { 'Content-Type': 'text/html' } }
-      );
-    }
-
-    // Proxy the request to the container
-    const previewHost = getPreviewHost();
-    const targetUrl = `http://${previewHost}:${project.containerPort}${targetPath}`;nnection issues
+ * Proxies requests to project preview containers to avoid connection issues
  * This is used as an iframe source to prevent ERR_CONNECTION_REFUSED errors
  */
 
@@ -46,8 +37,15 @@ export async function GET(
   { params }: { params: Promise<{ projectId: string }> }
 ) {
   try {
+    // Debug logging
+    console.log('[Preview Proxy] Request URL:', request.url);
+    console.log('[Preview Proxy] Cookies present:', request.cookies.size > 0);
+    
     const session = await getServerSession(authOptions);
+    console.log('[Preview Proxy] Session:', session ? `User ${session.user?.id}` : 'No session');
+    
     if (!session?.user?.id) {
+      console.log('[Preview Proxy] Auth failed - no session');
       return new NextResponse(
         `<!DOCTYPE html>
         <html>

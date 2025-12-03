@@ -54,6 +54,11 @@ COPY --from=builder /app/drizzle.config.ts ./drizzle.config.ts
 # Create directories for user repos with proper permissions
 RUN mkdir -p /app/user-repos && chown -R nextjs:nodejs /app/user-repos
 
+# Set global git config to prevent "Author identity unknown" errors
+RUN git config --global user.email "builder@appbuilder.local" && \
+    git config --global user.name "App Builder" && \
+    git config --global init.defaultBranch main
+
 # Note: For Docker socket access, we need to run as root
 # The user can be changed in docker-compose with user: root
 # Or properly configure docker group permissions on host

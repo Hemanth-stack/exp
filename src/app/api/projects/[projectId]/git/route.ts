@@ -102,7 +102,7 @@ export async function POST(
         if (!message) {
           return NextResponse.json({ error: 'Commit message required' }, { status: 400 });
         }
-        await gitManager.commit(repoPath, message);
+        await gitManager.commit(repoPath, message, session.user.email || undefined, session.user.name || undefined);
         return NextResponse.json({ success: true });
 
       case 'revert':

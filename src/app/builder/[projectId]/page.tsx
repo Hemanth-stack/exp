@@ -32,6 +32,10 @@ import {
   ChevronUp,
   RefreshCcw,
   Terminal,
+  Undo2,
+  Redo2,
+  FileText,
+  AlertTriangle,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -41,15 +45,49 @@ import { cn } from '@/lib/utils';
 // Chat Mode type
 type ChatMode = 'chat' | 'agent';
 
+interface FileAction {
+  path: string;
+  action: 'created' | 'updated' | 'deleted';
+  name: string;
+}
+
+interface ThinkingContent {
+  content: string;
+  timestamp: Date;
+}
+
+// File change history for undo/redo
+interface FileChange {
+  id: string;
+  timestamp: Date;
+  path: string;
+  action: 'created' | 'updated' | 'deleted';
+  beforeContent: string | null; // null for created files
+  afterContent: string | null;  // null for deleted files
+  messageId?: string; // Link to the message that caused this change
+}
+
+// Partial response for error recovery
+interface PartialResponse {
+  messageId: string;
+  content: string;
+  filesCreated: string[];
+  timestamp: Date;
+  wasInterrupted: boolean;
+}
+
 interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   createdAt: Date;
   filesCreated?: string[];  // Track files created by this message
+  fileActions?: FileAction[]; // Detailed file actions with create/update/delete status
   isCodeResponse?: boolean; // Flag for responses that generated code
   error?: boolean; // Flag for error responses
   mode?: ChatMode; // Track which mode the message was sent in
+  thinkingContent?: ThinkingContent[]; // Store thinking/planning output
+  wasRecovered?: boolean; // Flag for recovered partial responses
 }
 
 interface GitCommit {
@@ -75,19 +113,203 @@ function formatChatMessage(content: string, filesCreated?: string[]): string {
     return content;
   }
   
-  // Extract just the description before the code block
+  // Extract just the description before the first code block
   const beforeCode = content.split(/```/)[0].trim();
   
-  // Build a clean message
+  // Also try to extract any text after all code blocks
+  const parts = content.split(/```[\s\S]*?```/);
+  const afterCode = parts.length > 1 ? parts[parts.length - 1].trim() : '';
+  
+  // Build a clean message with description
   let cleanMessage = beforeCode || "I've generated the code for you.";
+  
+  // If there's meaningful text after code, include it (but not if it's just "### FILE:" headers)
+  if (afterCode && !afterCode.startsWith('### FILE:') && afterCode.length > 10) {
+    cleanMessage += '\n\n' + afterCode;
+  }
   
   // Add file info if available
   if (filesCreated && filesCreated.length > 0) {
     cleanMessage += `\n\n📁 **Files created/updated:**\n${filesCreated.map(f => `- \`${f}\``).join('\n')}`;
-    cleanMessage += `\n\n✅ The code has been saved to your project. Switch to **Code Editor** view to see the changes.`;
+    cleanMessage += `\n\n✅ Code saved to your project. Check the **Code Editor** to view the changes.`;
   }
   
   return cleanMessage;
+}
+
+// ============= DIFF MODAL COMPONENT =============
+interface DiffModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  change: FileChange | null;
+}
+
+function DiffModal({ isOpen, onClose, change }: DiffModalProps) {
+  if (!isOpen || !change) return null;
+
+  // Simple diff rendering - split content by lines and compare
+  const beforeLines = change.beforeContent?.split('\n') || [];
+  const afterLines = change.afterContent?.split('\n') || [];
+  
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+      <div className="bg-card border rounded-xl shadow-2xl w-[90vw] max-w-5xl max-h-[85vh] flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between p-4 border-b bg-muted/50">
+          <div className="flex items-center gap-3">
+            <FileText className="h-5 w-5 text-primary" />
+            <div>
+              <h3 className="font-semibold text-lg">{change.path}</h3>
+              <p className="text-sm text-muted-foreground">
+                {change.action === 'created' ? '✅ Created' : 
+                 change.action === 'updated' ? '📝 Updated' : 
+                 '🗑️ Deleted'} 
+                • {new Date(change.timestamp).toLocaleTimeString()}
+              </p>
+            </div>
+          </div>
+          <Button variant="ghost" size="icon" onClick={onClose}>
+            <X className="h-5 w-5" />
+          </Button>
+        </div>
+
+        {/* Diff Content */}
+        <div className="flex-1 overflow-auto">
+          {change.action === 'created' ? (
+            // Show only the new content for created files
+            <div className="p-4">
+              <div className="mb-2 text-sm font-medium text-green-400 flex items-center gap-2">
+                <span className="px-2 py-0.5 bg-green-500/20 rounded">New File</span>
+              </div>
+              <pre className="text-sm font-mono bg-green-500/5 border border-green-500/20 rounded-lg p-4 overflow-x-auto whitespace-pre-wrap break-words">
+                {change.afterContent || '(empty file)'}
+              </pre>
+            </div>
+          ) : change.action === 'deleted' ? (
+            // Show only the deleted content
+            <div className="p-4">
+              <div className="mb-2 text-sm font-medium text-red-400 flex items-center gap-2">
+                <span className="px-2 py-0.5 bg-red-500/20 rounded">Deleted</span>
+              </div>
+              <pre className="text-sm font-mono bg-red-500/5 border border-red-500/20 rounded-lg p-4 overflow-x-auto whitespace-pre-wrap break-words line-through opacity-75">
+                {change.beforeContent || '(empty file)'}
+              </pre>
+            </div>
+          ) : (
+            // Side-by-side diff for updated files
+            <div className="grid grid-cols-2 divide-x h-full">
+              {/* Before */}
+              <div className="flex flex-col">
+                <div className="p-2 bg-red-500/10 text-red-400 text-sm font-medium sticky top-0 border-b">
+                  Before ({beforeLines.length} lines)
+                </div>
+                <div className="p-2 overflow-auto flex-1">
+                  <pre className="text-xs font-mono">
+                    {beforeLines.map((line, idx) => {
+                      const isRemoved = !afterLines.includes(line);
+                      return (
+                        <div
+                          key={idx}
+                          className={cn(
+                            "px-2 py-0.5 -mx-2",
+                            isRemoved && "bg-red-500/10 text-red-300"
+                          )}
+                        >
+                          <span className="inline-block w-8 text-right mr-3 text-muted-foreground select-none opacity-50">
+                            {idx + 1}
+                          </span>
+                          {line || ' '}
+                        </div>
+                      );
+                    })}
+                  </pre>
+                </div>
+              </div>
+              
+              {/* After */}
+              <div className="flex flex-col">
+                <div className="p-2 bg-green-500/10 text-green-400 text-sm font-medium sticky top-0 border-b">
+                  After ({afterLines.length} lines)
+                </div>
+                <div className="p-2 overflow-auto flex-1">
+                  <pre className="text-xs font-mono">
+                    {afterLines.map((line, idx) => {
+                      const isAdded = !beforeLines.includes(line);
+                      return (
+                        <div
+                          key={idx}
+                          className={cn(
+                            "px-2 py-0.5 -mx-2",
+                            isAdded && "bg-green-500/10 text-green-300"
+                          )}
+                        >
+                          <span className="inline-block w-8 text-right mr-3 text-muted-foreground select-none opacity-50">
+                            {idx + 1}
+                          </span>
+                          {line || ' '}
+                        </div>
+                      );
+                    })}
+                  </pre>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="p-3 border-t bg-muted/30 flex justify-end gap-2">
+          <Button variant="outline" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============= RECOVERY BANNER COMPONENT =============
+interface RecoveryBannerProps {
+  partialResponse: PartialResponse | null;
+  onRecover: () => void;
+  onDismiss: () => void;
+}
+
+function RecoveryBanner({ partialResponse, onRecover, onDismiss }: RecoveryBannerProps) {
+  if (!partialResponse) return null;
+
+  return (
+    <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 mb-3 flex items-start gap-3 animate-in fade-in slide-in-from-top-2">
+      <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-amber-200">Interrupted Response Detected</p>
+        <p className="text-xs text-amber-300/70 mt-0.5">
+          A previous response was interrupted. You can recover the partial content.
+          {partialResponse.filesCreated.length > 0 && (
+            <span> ({partialResponse.filesCreated.length} files were created)</span>
+          )}
+        </p>
+      </div>
+      <div className="flex gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onRecover}
+          className="text-xs border-amber-500/50 text-amber-200 hover:bg-amber-500/20"
+        >
+          Recover
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onDismiss}
+          className="text-xs text-muted-foreground hover:text-foreground"
+        >
+          Dismiss
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 interface FileNode {
@@ -166,12 +388,22 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
   
   // Agent progress states
   const [agentSteps, setAgentSteps] = useState<AgentStep[]>([]);
-  const [agentProgressCollapsed, setAgentProgressCollapsed] = useState(false);
   
   // Chat mode state
   const [chatMode, setChatMode] = useState<ChatMode>('chat');
   
+  // File change history for undo/redo
+  const [fileChangeHistory, setFileChangeHistory] = useState<FileChange[]>([]);
+  const [undoStack, setUndoStack] = useState<FileChange[]>([]);
+  const [showDiffModal, setShowDiffModal] = useState(false);
+  const [selectedDiff, setSelectedDiff] = useState<FileChange | null>(null);
+  
+  // Partial response recovery
+  const [partialResponse, setPartialResponse] = useState<PartialResponse | null>(null);
+  const [showRecoveryBanner, setShowRecoveryBanner] = useState(false);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
@@ -193,12 +425,25 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, projectId]);
 
+  // Scroll to bottom when messages change, but with a small delay to ensure content is rendered
   useEffect(() => {
-    scrollToBottom();
-  }, [messages, currentMessage]);
+    const timer = setTimeout(() => {
+      scrollToBottom();
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [messages, currentMessage, agentSteps]);
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+    // Also scroll the scroll area container if available
+    if (scrollAreaRef.current) {
+      const scrollContainer = scrollAreaRef.current.querySelector('[data-radix-scroll-area-viewport]');
+      if (scrollContainer) {
+        scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      }
+    }
   };
 
   const fetchGitHubStatus = async () => {
@@ -333,6 +578,264 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
     }
   };
 
+  // ============= UNDO/REDO FUNCTIONALITY =============
+  
+  // Track a file change for undo capability
+  const trackFileChange = async (
+    path: string, 
+    action: 'created' | 'updated' | 'deleted',
+    beforeContent: string | null,
+    afterContent: string | null,
+    messageId?: string
+  ) => {
+    const change: FileChange = {
+      id: `change-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: new Date(),
+      path,
+      action,
+      beforeContent,
+      afterContent,
+      messageId,
+    };
+    
+    setFileChangeHistory(prev => [...prev, change]);
+    // Clear undo stack when new change is made
+    setUndoStack([]);
+    
+    return change;
+  };
+
+  // Undo the last file change
+  const handleUndoLastChange = async () => {
+    if (fileChangeHistory.length === 0) {
+      toast({
+        title: 'Nothing to undo',
+        description: 'No file changes to undo',
+      });
+      return;
+    }
+
+    const lastChange = fileChangeHistory[fileChangeHistory.length - 1];
+    
+    try {
+      if (lastChange.action === 'created') {
+        // Delete the created file
+        await fetch(`/api/projects/${projectId}/files/content`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: lastChange.path }),
+        });
+        toast({
+          title: 'Undone: File deleted',
+          description: `Removed ${lastChange.path}`,
+        });
+      } else if (lastChange.action === 'updated' && lastChange.beforeContent !== null) {
+        // Restore the previous content
+        await fetch(`/api/projects/${projectId}/files/content`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            path: lastChange.path, 
+            content: lastChange.beforeContent 
+          }),
+        });
+        toast({
+          title: 'Undone: File restored',
+          description: `Restored ${lastChange.path} to previous version`,
+        });
+      } else if (lastChange.action === 'deleted' && lastChange.beforeContent !== null) {
+        // Recreate the deleted file
+        await fetch(`/api/projects/${projectId}/files/content`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            path: lastChange.path, 
+            content: lastChange.beforeContent 
+          }),
+        });
+        toast({
+          title: 'Undone: File restored',
+          description: `Recreated ${lastChange.path}`,
+        });
+      }
+
+      // Move to undo stack for redo capability
+      setUndoStack(prev => [...prev, lastChange]);
+      setFileChangeHistory(prev => prev.slice(0, -1));
+      
+      // Refresh files and preview
+      fetchFiles();
+      if (previewStatus === 'running') {
+        setTimeout(() => setPreviewKey(prev => prev + 1), 500);
+      }
+    } catch (error) {
+      toast({
+        title: 'Undo failed',
+        description: error instanceof Error ? error.message : 'Failed to undo change',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  // Redo the last undone change
+  const handleRedoLastChange = async () => {
+    if (undoStack.length === 0) {
+      toast({
+        title: 'Nothing to redo',
+        description: 'No undone changes to redo',
+      });
+      return;
+    }
+
+    const lastUndo = undoStack[undoStack.length - 1];
+    
+    try {
+      if (lastUndo.action === 'created' && lastUndo.afterContent !== null) {
+        // Recreate the file
+        await fetch(`/api/projects/${projectId}/files/content`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            path: lastUndo.path, 
+            content: lastUndo.afterContent 
+          }),
+        });
+        toast({
+          title: 'Redone: File created',
+          description: `Recreated ${lastUndo.path}`,
+        });
+      } else if (lastUndo.action === 'updated' && lastUndo.afterContent !== null) {
+        // Apply the change again
+        await fetch(`/api/projects/${projectId}/files/content`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            path: lastUndo.path, 
+            content: lastUndo.afterContent 
+          }),
+        });
+        toast({
+          title: 'Redone: File updated',
+          description: `Reapplied changes to ${lastUndo.path}`,
+        });
+      } else if (lastUndo.action === 'deleted') {
+        // Delete the file again
+        await fetch(`/api/projects/${projectId}/files/content`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: lastUndo.path }),
+        });
+        toast({
+          title: 'Redone: File deleted',
+          description: `Deleted ${lastUndo.path} again`,
+        });
+      }
+
+      // Move back to history
+      setFileChangeHistory(prev => [...prev, lastUndo]);
+      setUndoStack(prev => prev.slice(0, -1));
+      
+      // Refresh files and preview
+      fetchFiles();
+      if (previewStatus === 'running') {
+        setTimeout(() => setPreviewKey(prev => prev + 1), 500);
+      }
+    } catch (error) {
+      toast({
+        title: 'Redo failed',
+        description: error instanceof Error ? error.message : 'Failed to redo change',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  // View diff for a specific file change
+  const handleViewDiff = (change: FileChange) => {
+    setSelectedDiff(change);
+    setShowDiffModal(true);
+  };
+
+  // ============= ERROR RECOVERY =============
+  
+  // Save partial response for recovery
+  const savePartialResponse = (messageId: string, content: string, filesCreated: string[]) => {
+    const partial: PartialResponse = {
+      messageId,
+      content,
+      filesCreated,
+      timestamp: new Date(),
+      wasInterrupted: true,
+    };
+    setPartialResponse(partial);
+    // Store in localStorage for persistence across refreshes
+    try {
+      localStorage.setItem(`partial_response_${projectId}`, JSON.stringify(partial));
+    } catch {
+      // Ignore storage errors
+    }
+  };
+
+  // Recover partial response
+  const recoverPartialResponse = () => {
+    if (!partialResponse) return;
+    
+    const recoveredMessage: Message = {
+      id: partialResponse.messageId,
+      role: 'assistant',
+      content: partialResponse.content + '\n\n*[Response was interrupted - recovered partial content]*',
+      createdAt: partialResponse.timestamp,
+      filesCreated: partialResponse.filesCreated,
+      isCodeResponse: partialResponse.filesCreated.length > 0,
+      wasRecovered: true,
+    };
+    
+    setMessages(prev => [...prev, recoveredMessage]);
+    setPartialResponse(null);
+    setShowRecoveryBanner(false);
+    
+    // Clear from localStorage
+    try {
+      localStorage.removeItem(`partial_response_${projectId}`);
+    } catch {
+      // Ignore storage errors
+    }
+    
+    toast({
+      title: 'Response recovered',
+      description: 'Partial response has been restored',
+    });
+  };
+
+  // Dismiss recovery banner
+  const dismissRecovery = () => {
+    setPartialResponse(null);
+    setShowRecoveryBanner(false);
+    try {
+      localStorage.removeItem(`partial_response_${projectId}`);
+    } catch {
+      // Ignore
+    }
+  };
+
+  // Check for partial response on mount
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(`partial_response_${projectId}`);
+      if (stored) {
+        const partial = JSON.parse(stored) as PartialResponse;
+        // Only show if less than 1 hour old
+        if (new Date().getTime() - new Date(partial.timestamp).getTime() < 3600000) {
+          setPartialResponse(partial);
+          setShowRecoveryBanner(true);
+        } else {
+          localStorage.removeItem(`partial_response_${projectId}`);
+        }
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }, [projectId]);
+
   const [pendingRetryMessage, setPendingRetryMessage] = useState<string | null>(null);
   
   const handleRetryMessage = (messageContent: string) => {
@@ -420,6 +923,16 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                 };
               });
               setMessages(loadedMessages);
+              
+              // Restore the last used chat mode from localStorage or from last message
+              try {
+                const savedMode = localStorage.getItem(`chat_mode_${projectId}`);
+                if (savedMode === 'chat' || savedMode === 'agent') {
+                  setChatMode(savedMode);
+                }
+              } catch {
+                // Ignore localStorage errors
+              }
             }
           }
         }
@@ -430,6 +943,15 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
       setIsLoadingHistory(false);
     }
   };
+
+  // Persist chat mode to localStorage when it changes
+  useEffect(() => {
+    try {
+      localStorage.setItem(`chat_mode_${projectId}`, chatMode);
+    } catch {
+      // Ignore localStorage errors
+    }
+  }, [chatMode, projectId]);
 
   const fetchFiles = async () => {
     try {
@@ -562,18 +1084,51 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
     }
   };
 
-  // Keyboard shortcut for save
+  // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Cmd/Ctrl + S to save
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
         handleSaveFile();
+      }
+      // Cmd/Ctrl + M to toggle mode
+      if ((e.metaKey || e.ctrlKey) && e.key === 'm') {
+        e.preventDefault();
+        setChatMode(prev => prev === 'chat' ? 'agent' : 'chat');
+      }
+      // Cmd/Ctrl + P to toggle preview (if not in input)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'p' && !(e.target instanceof HTMLTextAreaElement)) {
+        e.preventDefault();
+        setViewMode(prev => prev === 'preview' ? 'code' : 'preview');
+      }
+      // Cmd/Ctrl + Z to undo file changes (when not in textarea)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey && !(e.target instanceof HTMLTextAreaElement)) {
+        e.preventDefault();
+        handleUndoLastChange();
+      }
+      // Cmd/Ctrl + Shift + Z to redo file changes (when not in textarea)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'z' && !(e.target instanceof HTMLTextAreaElement)) {
+        e.preventDefault();
+        handleRedoLastChange();
+      }
+      // Cmd/Ctrl + Y to redo (alternative)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'y' && !(e.target instanceof HTMLTextAreaElement)) {
+        e.preventDefault();
+        handleRedoLastChange();
+      }
+      // Escape to stop generation
+      if (e.key === 'Escape' && isStreaming) {
+        e.preventDefault();
+        abortControllerRef.current?.abort();
+        setIsStreaming(false);
+        setCurrentMessage('');
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, openTabs]);
+  }, [activeTab, openTabs, isStreaming, fileChangeHistory, undoStack]);
 
   const checkPreviewStatus = async () => {
     try {
@@ -702,7 +1257,6 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
     setIsStreaming(true);
     setCurrentMessage('');
     setAgentSteps([]); // Reset steps for new message
-    setAgentProgressCollapsed(false); // Expand progress view
 
     const newMessage: Message = {
       id: Date.now().toString(),
@@ -713,6 +1267,10 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
     };
 
     setMessages(prev => [...prev, newMessage]);
+
+    // Track content for potential error recovery
+    let streamedContent = '';
+    const createdFilesList: string[] = [];
 
     try {
       abortControllerRef.current = new AbortController();
@@ -736,6 +1294,8 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
       const decoder = new TextDecoder();
       let assistantContent = '';
       const createdFiles: string[] = [];
+      const fileActions: FileAction[] = []; // Track detailed file actions
+      const thinkingContents: ThinkingContent[] = []; // Track thinking/planning output
       let buffer = '';  // Buffer for incomplete SSE messages
 
       while (true) {
@@ -759,6 +1319,11 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                 setAgentSteps(prev => [...prev, data as AgentStep]);
               } else if (data.type === 'thinking') {
                 // Handle thinking/planning output - add to agent steps for visibility
+                const thinkingItem: ThinkingContent = {
+                  content: data.content,
+                  timestamp: new Date()
+                };
+                thinkingContents.push(thinkingItem);
                 setAgentSteps(prev => [...prev, {
                   type: 'step',
                   step: 'thinking',
@@ -772,16 +1337,73 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
               } else if (data.type === 'text' && data.content) {
                 // Append streamed text
                 assistantContent += data.content;
-                // Show cleaned version while streaming
-                const cleanedMessage = formatChatMessage(assistantContent);
-                setCurrentMessage(cleanedMessage);
-              } else if (data.type === 'file_created') {
+                streamedContent = assistantContent; // Update for error recovery
+                // Show full message while streaming (don't strip content)
+                setCurrentMessage(assistantContent);
+              } else if (data.type === 'file_created' && chatMode === 'agent') {
+                // Only process file events in Agent Mode - ignore in Chat Mode
                 if (data.file?.path) {
                   createdFiles.push(data.file.path);
+                  createdFilesList.push(data.file.path); // Update for error recovery
+                  // Track detailed file action
+                  const actionType = data.action === 'updated' ? 'updated' : 'created';
+                  fileActions.push({
+                    path: data.file.path,
+                    action: actionType,
+                    name: data.file.name || data.file.path.split('/').pop() || data.file.path
+                  });
+                  
+                  // Track file change for undo capability
+                  trackFileChange(
+                    data.file.path,
+                    actionType,
+                    data.beforeContent || null,
+                    data.afterContent || null,
+                    newMessage.id
+                  );
                 }
-                const action = data.action === 'updated' ? '📝 Updated' : '✅ Created';
+                const actionIcon = data.action === 'updated' ? '📝' : '✅';
+                const actionText = data.action === 'updated' ? 'Updated' : 'Created';
+                // Show a step for file operation
+                setAgentSteps(prev => [...prev, {
+                  type: 'step',
+                  step: 'file_action',
+                  status: 'complete',
+                  message: `${actionIcon} ${actionText}: ${data.file?.path || 'file'}`,
+                  details: data.action === 'updated' ? 'Modified existing file' : 'New file created',
+                  icon: actionIcon
+                } as AgentStep]);
                 toast({
-                  title: `${action}`,
+                  title: `${actionIcon} ${actionText}`,
+                  description: data.file?.path || 'file',
+                });
+              } else if (data.type === 'file_deleted' && chatMode === 'agent') {
+                // Only process file events in Agent Mode - ignore in Chat Mode
+                if (data.file?.path) {
+                  fileActions.push({
+                    path: data.file.path,
+                    action: 'deleted',
+                    name: data.file.name || data.file.path.split('/').pop() || data.file.path
+                  });
+                  
+                  // Track file deletion for undo capability
+                  trackFileChange(
+                    data.file.path,
+                    'deleted',
+                    data.beforeContent || null,
+                    null,
+                    newMessage.id
+                  );
+                }
+                setAgentSteps(prev => [...prev, {
+                  type: 'step',
+                  step: 'file_action',
+                  status: 'complete',
+                  message: `🗑️ Deleted: ${data.file?.path || 'file'}`,
+                  icon: '🗑️'
+                } as AgentStep]);
+                toast({
+                  title: '🗑️ Deleted',
                   description: data.file?.path || 'file',
                 });
               } else if (data.type === 'error') {
@@ -795,7 +1417,12 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                   setConversationId(data.conversationId);
                 }
                 
-                // Format the final message
+                // Clear agent steps after a short delay so completion message is visible
+                setTimeout(() => {
+                  setAgentSteps([]);
+                }, 3000);
+                
+                // Format the final message - keep more content visible
                 const formattedContent = formatChatMessage(assistantContent, createdFiles);
                 
                 const assistantMessage: Message = {
@@ -804,15 +1431,12 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                   content: formattedContent,
                   createdAt: new Date(),
                   filesCreated: createdFiles,
+                  fileActions: fileActions,
                   isCodeResponse: createdFiles.length > 0,
+                  thinkingContent: thinkingContents.length > 0 ? thinkingContents : undefined,
                 };
                 setMessages(prev => [...prev, assistantMessage]);
                 setCurrentMessage('');
-                
-                // Auto-collapse progress after completion
-                setTimeout(() => {
-                  setAgentProgressCollapsed(true);
-                }, 1500);
                 
                 if (data.filesCreated > 0) {
                   fetchFiles();
@@ -836,11 +1460,22 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
       }
     } catch (error: unknown) {
       if (error instanceof Error && error.name !== 'AbortError') {
-        toast({
-          title: 'Error',
-          description: 'Failed to send message',
-          variant: 'destructive',
-        });
+        // Save partial response for potential recovery
+        if (streamedContent || createdFilesList.length > 0) {
+          savePartialResponse(newMessage.id, streamedContent, createdFilesList);
+          setShowRecoveryBanner(true);
+          toast({
+            title: 'Response Interrupted',
+            description: 'Partial response saved. You can recover it from the banner above.',
+            variant: 'destructive',
+          });
+        } else {
+          toast({
+            title: 'Error',
+            description: 'Failed to send message',
+            variant: 'destructive',
+          });
+        }
       }
     } finally {
       setIsStreaming(false);
@@ -1008,6 +1643,28 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
               <div className="flex items-center justify-between mb-2">
                 <h2 className="font-semibold">AI Assistant</h2>
                 <div className="flex items-center gap-1">
+                  {/* Undo/Redo Buttons */}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleUndoLastChange}
+                    disabled={fileChangeHistory.length === 0 || isStreaming}
+                    className="h-8 px-2"
+                    title={`Undo last change${fileChangeHistory.length > 0 ? ` (${fileChangeHistory.length})` : ''}`}
+                  >
+                    <Undo2 className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleRedoLastChange}
+                    disabled={undoStack.length === 0 || isStreaming}
+                    className="h-8 px-2"
+                    title={`Redo${undoStack.length > 0 ? ` (${undoStack.length})` : ''}`}
+                  >
+                    <Redo2 className="h-4 w-4" />
+                  </Button>
+                  <div className="w-px h-5 bg-border mx-1" />
                   <Button
                     variant="ghost"
                     size="sm"
@@ -1135,8 +1792,17 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
               </div>
             )}
             
-            <ScrollArea className="flex-1 p-4">
-              <div className="space-y-4">
+            <ScrollArea className="flex-1 p-4" ref={scrollAreaRef}>
+              <div className="space-y-4 pb-4">
+                {/* Recovery Banner - show when there's a partial response to recover */}
+                {showRecoveryBanner && partialResponse && (
+                  <RecoveryBanner
+                    partialResponse={partialResponse}
+                    onRecover={recoverPartialResponse}
+                    onDismiss={dismissRecovery}
+                  />
+                )}
+                
                 {isLoadingHistory ? (
                   <div className="flex justify-center py-4">
                     <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -1147,8 +1813,9 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                       <>
                         <div className="text-4xl">💬</div>
                         <div>
-                          <p className="font-medium text-foreground">Chat Mode</p>
-                          <p className="text-sm mt-1">Tell me what you want to build</p>
+                          <p className="font-medium text-foreground">Chat Mode (Planning)</p>
+                          <p className="text-sm mt-1">Tell me what you want to build - let&apos;s plan together</p>
+                          <p className="text-xs mt-2 text-muted-foreground/70">Switch to Agent Mode (🤖) when ready to write code</p>
                         </div>
                         <div className="flex flex-wrap justify-center gap-2 pt-2">
                           {['Personal blog', 'Portfolio', 'Landing page', 'Dashboard'].map((suggestion) => (
@@ -1202,20 +1869,71 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                         {/* Show quick actions for code responses */}
                         {message.role === 'assistant' && message.filesCreated && message.filesCreated.length > 0 && (
                           <div className="mt-3 pt-2 border-t border-border/50">
-                            <div className="flex flex-wrap gap-2">
-                              {message.filesCreated.map((file) => (
+                            <div className="flex items-center justify-between mb-2">
+                              <p className="text-xs text-muted-foreground">📁 Files modified:</p>
+                              {/* View all changes button */}
+                              {fileChangeHistory.some(c => c.messageId === message.id) && (
                                 <button
-                                  key={file}
                                   onClick={() => {
-                                    fetchFileContent(file);
-                                    setViewMode('code');
+                                    const changes = fileChangeHistory.filter(c => c.messageId === message.id);
+                                    if (changes.length > 0) {
+                                      handleViewDiff(changes[0]);
+                                    }
                                   }}
-                                  className="text-xs px-2 py-1 bg-background/50 hover:bg-background rounded border flex items-center gap-1 transition-colors"
+                                  className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
                                 >
-                                  <Code className="h-3 w-3" />
-                                  {file.split('/').pop()}
+                                  <Eye className="h-3 w-3" />
+                                  View Changes
                                 </button>
-                              ))}
+                              )}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {(message.fileActions || message.filesCreated?.map(f => ({ 
+                                path: f, 
+                                action: 'created' as const, 
+                                name: f.split('/').pop() || f 
+                              })) || []).map((fileAction) => {
+                                const actionIcon = fileAction.action === 'updated' ? '📝' : 
+                                                   fileAction.action === 'deleted' ? '🗑️' : '✅';
+                                const actionColor = fileAction.action === 'updated' ? 'border-yellow-500/50 bg-yellow-500/10' :
+                                                    fileAction.action === 'deleted' ? 'border-red-500/50 bg-red-500/10' : 
+                                                    'border-green-500/50 bg-green-500/10';
+                                
+                                // Find change for this file to enable diff view
+                                const fileChange = fileChangeHistory.find(
+                                  c => c.path === fileAction.path && c.messageId === message.id
+                                );
+                                
+                                return (
+                                  <div key={fileAction.path} className="flex items-center gap-1">
+                                    <button
+                                      onClick={() => {
+                                        if (fileAction.action !== 'deleted') {
+                                          fetchFileContent(fileAction.path);
+                                          setViewMode('code');
+                                        }
+                                      }}
+                                      disabled={fileAction.action === 'deleted'}
+                                      className={`text-xs px-2 py-1 rounded-l border flex items-center gap-1 transition-colors ${actionColor} ${fileAction.action !== 'deleted' ? 'hover:bg-background cursor-pointer' : 'cursor-not-allowed opacity-60'}`}
+                                      title={`${fileAction.action === 'updated' ? 'Modified' : fileAction.action === 'deleted' ? 'Deleted' : 'Created'}: ${fileAction.path}`}
+                                    >
+                                      <span>{actionIcon}</span>
+                                      <Code className="h-3 w-3" />
+                                      <span>{fileAction.name}</span>
+                                    </button>
+                                    {/* Diff button for this file */}
+                                    {fileChange && (
+                                      <button
+                                        onClick={() => handleViewDiff(fileChange)}
+                                        className={`text-xs px-1.5 py-1 rounded-r border-y border-r transition-colors ${actionColor} hover:bg-background`}
+                                        title="View diff"
+                                      >
+                                        <Eye className="h-3 w-3" />
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })}
                             </div>
                           </div>
                         )}
@@ -1253,25 +1971,27 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                   ))
                 )}
                 
-                {/* Agent Progress Steps */}
+                {/* Agent Progress Steps - Always visible inline display */}
                 {(isStreaming || agentSteps.length > 0) && (
                   <div className="mb-4">
                     <AgentProgress
                       steps={agentSteps}
                       isStreaming={isStreaming}
-                      collapsed={agentProgressCollapsed}
-                      onToggleCollapse={() => setAgentProgressCollapsed(!agentProgressCollapsed)}
                     />
                   </div>
                 )}
                 
-                {/* Streaming message display */}
+                {/* Streaming message display - In Agent Mode, only show description, not code */}
                 {isStreaming && currentMessage && (
                   <div className="flex justify-start">
-                    <div className="max-w-[80%] rounded-lg p-3 bg-muted">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {currentMessage}
-                      </ReactMarkdown>
+                    <div className="max-w-[95%] rounded-lg p-3 bg-muted overflow-auto">
+                      <div className="prose prose-sm dark:prose-invert max-w-none break-words">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {chatMode === 'agent' 
+                            ? formatChatMessage(currentMessage, []) 
+                            : currentMessage}
+                        </ReactMarkdown>
+                      </div>
                       <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1" />
                     </div>
                   </div>
@@ -1287,7 +2007,8 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                   </div>
                 )}
                 
-                <div ref={messagesEndRef} />
+                {/* Extra padding at the bottom to ensure content isn't cut off */}
+                <div ref={messagesEndRef} className="h-4" />
               </div>
             </ScrollArea>
 
@@ -1369,7 +2090,12 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
                 </div>
               </div>
               <p className="text-xs text-muted-foreground mt-2">
-                {isStreaming ? '⏳ Generating... Click stop button to cancel' : '💡 Tip: Ask to create/edit multiple files at once'}
+                {isStreaming 
+                  ? '⏳ Generating... Click stop button to cancel' 
+                  : chatMode === 'chat'
+                    ? '� Chat Mode: Plan and discuss your project. Switch to 🤖 to write code.'
+                    : '🤖 Agent Mode: I will write code and modify files. Switch to 💬 to plan.'
+                }
               </p>
             </div>
           </div>
@@ -1669,6 +2395,16 @@ export default function ProjectBuilderPage({ params }: { params: Promise<{ proje
           </div>
         </div>
       </div>
+      
+      {/* Diff Modal */}
+      <DiffModal
+        isOpen={showDiffModal}
+        onClose={() => {
+          setShowDiffModal(false);
+          setSelectedDiff(null);
+        }}
+        change={selectedDiff}
+      />
     </div>
   );
 }

@@ -162,3 +162,74 @@
    - Test "fix this code..." (debug)
    - Test "analyze this code..." (analyze)
    - Test "improve this code..." (improve)
+
+# User Complaint Fixes Summary
+
+## Date: December 3, 2025
+
+### Issues Addressed:
+
+#### 1. **Thinking Mode Goes Directly to Fixes**
+**Problem:** When users asked to "check the code for issues" in thinking mode, it would immediately start making fixes instead of planning.
+
+**Solution:**
+- Updated `src/lib/chat-memory.ts` to explicitly prevent code generation in Chat Mode
+- Added clear instructions to the Chat Mode system prompt that it should NOT:
+  - Generate code
+  - Fix bugs
+  - Analyze code for issues
+  - Make any code changes
+- When users ask for code-related tasks in Chat Mode, the AI now responds with a message directing them to switch to Agent Mode
+
+#### 2. **Thinking Mode Not Working Well**
+**Problem:** The distinction between Chat Mode (planning) and Agent Mode (building) was not clear.
+
+**Solution:**
+- Updated welcome message to clearly explain the two modes
+- Added explicit descriptions:
+  - 💬 **Chat Mode**: Planning only, NO code writing
+  - 🤖 **Agent Mode**: Code generation and file modifications
+- Updated mode switch messages to be more descriptive
+- Added helper text below the input showing current mode and its purpose
+
+#### 3. **Logs and LLM Text Getting Cut Off at the Top**
+**Problem:** Users couldn't see all logs and text from the LLM - content was being cut off.
+
+**Solution:**
+- Added `scrollAreaRef` for better scroll control
+- Updated `scrollToBottom` function to properly scroll the container
+- Added extra padding at the bottom of the message area
+- Increased max-width of streaming message display from 80% to 95%
+- Added `overflow-auto` to streaming message container
+- Made the AgentProgress component sticky at the top when streaming
+
+### Dev View Improvements (Agent Actions Visibility):
+
+#### 4. **File Operations Visibility**
+**Problem:** Users couldn't see what files were being created, modified, or deleted with proper details.
+
+**Solution:**
+- Added new `FileAction` interface to track detailed file operations
+- Each file operation now shows:
+  - ✅ Created: New file created
+  - 📝 Updated: Existing file modified (with size change info)
+  - 🗑️ Deleted: File removed
+- Color-coded file action badges:
+  - Green for created files
+  - Yellow for updated files
+  - Red for deleted files
+- Added `file_action` step type to AgentProgress component
+- File operation steps now show detailed info like "Modified existing file (500 → 750 chars)"
+
+#### 5. **Improved Agent Progress Panel**
+- Made the steps list scrollable (max-height 300px) for long operation lists
+- Steps now preserve all file operations and thinking outputs (not grouped)
+- Added file count badge showing total files affected
+- Thinking content is now preserved and shown individually
+
+### Files Modified:
+1. `src/lib/chat-memory.ts` - Updated Chat Mode system prompt
+2. `src/app/builder/[projectId]/page.tsx` - Added FileAction tracking, improved scroll, better mode hints
+3. `src/components/AgentProgress.tsx` - Added file_action step, improved grouping, scrollable list
+4. `src/components/ChatConsole.tsx` - Updated welcome and mode switch messages
+5. `src/app/api/projects/[projectId]/chat/route.ts` - Enhanced file operation details

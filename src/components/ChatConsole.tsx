@@ -85,12 +85,25 @@ export function ChatConsole({
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Auto-scroll to bottom
+  // Auto-scroll to bottom with proper timing
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const timer = setTimeout(() => {
+      if (messagesEndRef.current) {
+        messagesEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      }
+      // Also scroll the scroll area container
+      if (scrollAreaRef.current) {
+        const scrollContainer = scrollAreaRef.current.querySelector('[data-radix-scroll-area-viewport]');
+        if (scrollContainer) {
+          scrollContainer.scrollTop = scrollContainer.scrollHeight;
+        }
+      }
+    }, 100);
+    return () => clearTimeout(timer);
   }, [messages, currentStreamContent]);
 
   // Load conversation history on mount
@@ -118,9 +131,15 @@ export function ChatConsole({
 
 I'm here to help you create your web application. Let's start by understanding what you want to build.
 
-**Chat Mode** is for planning - we'll discuss your requirements, features, and design preferences.
+**💬 Chat Mode** (current) is for planning only:
+- Discuss your requirements and features
+- Plan the structure and design
+- I will NOT write or modify any code
 
-Once we have a clear plan, switch to **Agent Mode** and I'll start implementing your project!
+**🤖 Agent Mode** is for building:
+- I will write actual code files
+- Create, modify, and delete files
+- Implement your planned features
 
 *What would you like to build today?*`,
       mode: 'chat',
@@ -205,8 +224,8 @@ Once we have a clear plan, switch to **Agent Mode** and I'll start implementing 
       id: `mode-${Date.now()}`,
       role: 'system',
       content: newMode === 'agent' 
-        ? `🚀 **Switched to Agent Mode**\n\nI'll now start implementing your project based on our discussion. Tell me what to build first!`
-        : `💬 **Switched to Chat Mode**\n\nLet's continue planning. What would you like to discuss?`,
+        ? `🤖 **Switched to Agent Mode**\n\nI'll now start implementing your project. I can:\n- Create new files\n- Modify existing code\n- Delete files when needed\n\nTell me what to build!`
+        : `💬 **Switched to Chat Mode**\n\nI'm now in planning mode. I will NOT write or modify any code.\n\nLet's discuss your ideas, requirements, and design. When ready to code, switch back to 🤖 Agent Mode.`,
       mode: newMode,
       timestamp: new Date(),
     };
@@ -272,6 +291,13 @@ Once we have a clear plan, switch to **Agent Mode** and I'll start implementing 
               if (data.type === 'text' && data.content) {
                 assistantContent += data.content;
                 setCurrentStreamContent(assistantContent);
+              } else if (data.type === 'thinking' && data.content) {
+                // Show thinking content in the stream (for visibility)
+                // This is planning/reasoning output from the AI
+                if (!assistantContent.includes(data.content)) {
+                  assistantContent += `\n\n> ${data.content}\n\n`;
+                  setCurrentStreamContent(assistantContent);
+                }
               } else if (data.type === 'file_created' && data.file?.path) {
                 filesCreated.push(data.file.path);
               } else if (data.type === 'requirements_updated' && data.requirements) {
@@ -345,6 +371,16 @@ Once we have a clear plan, switch to **Agent Mode** and I'll start implementing 
       e.preventDefault();
       sendMessage();
     }
+    // Cmd/Ctrl + M to toggle mode
+    if ((e.metaKey || e.ctrlKey) && e.key === 'm') {
+      e.preventDefault();
+      handleModeSwitch(mode === 'chat' ? 'agent' : 'chat');
+    }
+    // Escape to stop generation
+    if (e.key === 'Escape' && isLoading) {
+      e.preventDefault();
+      stopGeneration();
+    }
   };
 
   const handleSuggestionClick = (suggestion: string) => {
@@ -392,19 +428,19 @@ Once we have a clear plan, switch to **Agent Mode** and I'll start implementing 
             {mode === 'chat' ? (
               <>
                 <Lightbulb className="h-3 w-3 mr-1" />
-                Planning Mode
+                Planning Mode (Read-Only)
               </>
             ) : (
               <>
                 <Sparkles className="h-3 w-3 mr-1" />
-                Building Mode
+                Building Mode (Can Edit Files)
               </>
             )}
           </Badge>
           <span className="text-xs text-muted-foreground">
             {mode === 'chat' 
-              ? 'Discuss and plan your project' 
-              : 'AI is implementing your project'}
+              ? 'Discuss and plan - no code changes' 
+              : 'AI will create and modify files'}
           </span>
         </div>
       </CardHeader>
@@ -477,15 +513,15 @@ Once we have a clear plan, switch to **Agent Mode** and I'll start implementing 
       )}
 
       {/* Messages Area */}
-      <ScrollArea className="flex-1 px-4 py-3">
+      <ScrollArea className="flex-1 px-4 py-3" ref={scrollAreaRef}>
         {isLoadingHistory ? (
           <div className="flex items-center justify-center h-full">
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
           </div>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-4 pb-4">
             {messages.map((message) => (
-              <MessageBubble key={message.id} message={message} />
+              <MessageBubble key={message.id} message={message} mode={mode} />
             ))}
             
             {/* Streaming content */}
@@ -498,10 +534,12 @@ Once we have a clear plan, switch to **Agent Mode** and I'll start implementing 
                   timestamp: new Date(),
                   isStreaming: true,
                 }}
+                mode={mode}
               />
             )}
             
-            <div ref={messagesEndRef} />
+            {/* Extra space at bottom for proper scrolling */}
+            <div ref={messagesEndRef} className="h-2" />
           </div>
         )}
       </ScrollArea>
@@ -600,74 +638,122 @@ Once we have a clear plan, switch to **Agent Mode** and I'll start implementing 
           )}
         </div>
         
-        {/* Mode Switch Hint */}
-        {mode === 'chat' && requirements.projectType && (
-          <p className="mt-2 text-xs text-muted-foreground flex items-center gap-1">
-            <ArrowRight className="h-3 w-3" />
-            Ready to build? Switch to <span className="font-medium">Agent Mode</span> to start implementation
-          </p>
-        )}
+        {/* Mode Switch Hint + Character Count + Keyboard Hints */}
+        <div className="mt-2 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            {mode === 'chat' && requirements.projectType && (
+              <p className="text-xs text-muted-foreground flex items-center gap-1">
+                <ArrowRight className="h-3 w-3" />
+                Ready? Switch to <span className="font-medium">Agent Mode</span>
+              </p>
+            )}
+            {mode === 'agent' && !requirements.projectType && (
+              <p className="text-xs text-muted-foreground flex items-center gap-1">
+                <ArrowRight className="h-3 w-3" />
+                Tip: Use <span className="font-medium">Chat Mode</span> to plan first
+              </p>
+            )}
+          </div>
+          <div className="flex items-center gap-3 text-xs text-muted-foreground">
+            <span className={cn(input.length > 45000 ? 'text-destructive' : '')}>
+              {input.length > 0 ? `${input.length.toLocaleString()} chars` : ''}
+            </span>
+            <span className="hidden sm:inline opacity-60" title="Keyboard shortcuts">
+              ⌘M mode · Enter send · Esc stop
+            </span>
+          </div>
+        </div>
       </div>
     </Card>
   );
 }
 
+// Format timestamp for display
+function formatTime(date: Date): string {
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
 // Message Bubble Component
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({ message, mode }: { message: Message; mode?: ChatMode }) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
 
   if (isSystem) {
     return (
       <div className="flex justify-center">
-        <div className="bg-muted/50 rounded-lg px-4 py-2 text-sm max-w-[80%]">
+        <div className="bg-muted/50 rounded-lg px-4 py-2 text-sm max-w-[90%]">
           <ReactMarkdown className="prose prose-sm dark:prose-invert max-w-none">
             {message.content}
           </ReactMarkdown>
+          <p className="text-[10px] text-muted-foreground/60 mt-1 text-center">
+            {formatTime(message.timestamp)}
+          </p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className={cn('flex gap-3', isUser ? 'justify-end' : 'justify-start')}>
+    <div className={cn('flex gap-3 group', isUser ? 'justify-end' : 'justify-start')}>
       {!isUser && (
         <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
           <Bot className="h-4 w-4 text-primary" />
         </div>
       )}
       
-      <div
-        className={cn(
-          'rounded-lg px-4 py-2 max-w-[80%]',
-          isUser
-            ? 'bg-primary text-primary-foreground'
-            : 'bg-muted'
-        )}
-      >
-        <ReactMarkdown 
+      <div className="flex flex-col">
+        <div
           className={cn(
-            'prose prose-sm max-w-none',
-            isUser ? 'prose-invert' : 'dark:prose-invert'
+            'rounded-lg px-4 py-2 max-w-[85%] overflow-auto',
+            isUser
+              ? 'bg-primary text-primary-foreground'
+              : 'bg-muted'
           )}
         >
-          {message.content}
-        </ReactMarkdown>
-        
-        {/* Files created indicator */}
-        {message.filesCreated && message.filesCreated.length > 0 && (
-          <div className="mt-2 pt-2 border-t border-white/20">
-            <p className="text-xs opacity-80 flex items-center gap-1">
-              <FileCode className="h-3 w-3" />
-              {message.filesCreated.length} file(s) created
-            </p>
+          <div className="prose prose-sm max-w-none break-words">
+            <ReactMarkdown 
+              className={cn(
+                'prose prose-sm max-w-none',
+                isUser ? 'prose-invert' : 'dark:prose-invert'
+              )}
+            >
+              {message.content}
+            </ReactMarkdown>
           </div>
-        )}
+          
+          {/* Files created indicator - only show in agent mode */}
+          {message.filesCreated && message.filesCreated.length > 0 && (
+            <div className="mt-2 pt-2 border-t border-white/20">
+              <p className="text-xs opacity-80 flex items-center gap-1">
+                <FileCode className="h-3 w-3" />
+                {message.filesCreated.length} file(s) {mode === 'agent' ? 'created/updated' : 'would be created'}
+              </p>
+              <div className="flex flex-wrap gap-1 mt-1">
+                {message.filesCreated.slice(0, 5).map((file) => (
+                  <span key={file} className="text-xs px-1.5 py-0.5 bg-background/30 rounded">
+                    {file.split('/').pop()}
+                  </span>
+                ))}
+                {message.filesCreated.length > 5 && (
+                  <span className="text-xs opacity-60">+{message.filesCreated.length - 5} more</span>
+                )}
+              </div>
+            </div>
+          )}
+          
+          {/* Streaming indicator */}
+          {message.isStreaming && (
+            <span className="inline-block w-2 h-4 bg-current animate-pulse ml-1" />
+          )}
+        </div>
         
-        {/* Streaming indicator */}
-        {message.isStreaming && (
-          <span className="inline-block w-2 h-4 bg-current animate-pulse ml-1" />
-        )}
+        {/* Timestamp - show on hover */}
+        <p className={cn(
+          'text-[10px] text-muted-foreground/50 mt-0.5 opacity-0 group-hover:opacity-100 transition-opacity',
+          isUser ? 'text-right mr-1' : 'ml-1'
+        )}>
+          {formatTime(message.timestamp)}
+        </p>
       </div>
       
       {isUser && (

@@ -1,0 +1,10 @@
+user complaints :
+
+1. asking it to check the code for any issues on thinking mode takes it to fixes directly
+2. thinking mode is not working well 
+3. all logs and texts from llm should be visible. they always get cut out at the top. 
+
+dev view :
+thinking is for user to plan and get a view on project not to code. 
+whenever agents doing its job they should show whats happening like create file. filename with diff [if existing file is changed]. when deleting the file 
+

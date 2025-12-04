@@ -474,7 +474,7 @@ export async function POST(
     const { message: userMessage, conversationId, mode = 'agent' } = await request.json();
     const chatMode: ChatMode = mode === 'chat' ? 'chat' : 'agent';
 
-    if (!userMessage) {
+    if (!userMessage || (typeof userMessage === 'string' && userMessage.trim().length === 0)) {
       return NextResponse.json({ error: 'Message required' }, { status: 400 });
     }
 
@@ -482,6 +482,9 @@ export async function POST(
     if (typeof userMessage !== 'string' || userMessage.length > 50000) {
       return NextResponse.json({ error: 'Message too long (max 50,000 characters)' }, { status: 400 });
     }
+
+    // Trim the message
+    const trimmedMessage = userMessage.trim();
 
     // Get project info
     const [project] = await db
@@ -543,12 +546,9 @@ export async function POST(
     db.insert(messages).values({
       conversationId: conversation.id,
       role: 'user',
-      content: userMessage,
+      content: trimmedMessage,
       toolResults: JSON.stringify({ mode: chatMode }),
     }).then(() => {}).catch(console.error);
-
-    // Detect intent and target file
-    const intent = detectIntent(userMessage);
 
     // Create abort controller to handle client disconnection
     const abortController = new AbortController();
@@ -590,6 +590,152 @@ export async function POST(
         content: thought,
       })}\n\n`);
     };
+
+    // =============================================================================
+    // CHAT MODE: Simple conversational flow - NO code generation, NO file changes
+    // Includes read-only project context so AI can explain existing code
+    // =============================================================================
+    if (chatMode === 'chat') {
+      const stream = new ReadableStream({
+        async start(controller) {
+          try {
+            sendStep(controller, {
+              type: 'step',
+              step: 'understanding',
+              status: 'start',
+              message: 'Reading your message...',
+              icon: '💬'
+            });
+
+            // Get project context for read-only understanding (no modification)
+            let projectContextForChat = '';
+            try {
+              const repoPath = normalizeRepoPath(projectId);
+              const projectContext = await getProjectContext(repoPath);
+              if (projectContext) {
+                projectContextForChat = `\n\n## Project Context (Read-Only Reference)\nYou can discuss and explain this code, but CANNOT modify it in Chat Mode.\n\n${formatContextForPrompt(projectContext)}`;
+              }
+            } catch {
+              // Ignore errors - project context is optional for chat
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, 200));
+            
+            sendStep(controller, {
+              type: 'step',
+              step: 'understanding',
+              status: 'complete',
+              message: 'Ready to discuss',
+              icon: '💬'
+            });
+
+            // Build the chat-only system prompt with optional project context
+            let chatSystemPrompt = buildSystemPrompt('chat', memoryLane);
+            if (projectContextForChat) {
+              chatSystemPrompt += projectContextForChat;
+            }
+            
+            // Build conversation for the AI
+            const chatMessages: Array<{ role: 'user' | 'assistant'; content: string }> = history
+              .reverse()
+              .filter(msg => msg.content && msg.content.trim().length > 0)
+              .map(msg => ({
+                role: msg.role as 'user' | 'assistant',
+                content: msg.content.trim(),
+              }));
+            
+            chatMessages.push({ role: 'user', content: trimmedMessage });
+
+            sendStep(controller, {
+              type: 'step',
+              step: 'thinking',
+              status: 'start',
+              message: 'Thinking about your question...',
+              icon: '💭'
+            });
+
+            // Use streamText for chat mode - simple conversation
+            const result = streamText({
+              model: anthropic('claude-sonnet-4-20250514'),
+              system: chatSystemPrompt,
+              messages: chatMessages,
+              temperature: 0.7, // More conversational
+              abortSignal: abortController.signal,
+            });
+
+            // Stream the response
+            for await (const chunk of (await result).textStream) {
+              if (isAborted) break;
+              fullResponse += chunk;
+              safeEnqueue(controller, `data: ${JSON.stringify({ type: 'text', content: chunk })}\n\n`);
+            }
+
+            sendStep(controller, {
+              type: 'step',
+              step: 'thinking',
+              status: 'complete',
+              message: 'Response ready',
+              icon: '💬'
+            });
+
+            sendStep(controller, {
+              type: 'step',
+              step: 'complete',
+              status: 'complete',
+              message: '💬 Discussion complete (read-only mode)',
+              details: 'Switch to Agent Mode (🤖) to implement code',
+              icon: '✅'
+            });
+
+            // Save assistant message
+            db.insert(messages).values({
+              conversationId: conversation.id,
+              role: 'assistant',
+              content: fullResponse,
+              toolResults: JSON.stringify({ mode: 'chat', filesCreated: [] }),
+            }).then(() => {}).catch(console.error);
+
+            // Send done signal
+            safeEnqueue(controller, `data: ${JSON.stringify({
+              type: 'done',
+              conversationId: conversation.id,
+              filesCreated: 0,
+              mode: 'chat',
+            })}\n\n`);
+
+            controller.close();
+          } catch (error) {
+            console.error('Chat mode error:', error);
+            if (!isAborted) {
+              safeEnqueue(controller, `data: ${JSON.stringify({ 
+                type: 'error', 
+                error: 'Failed to process chat message' 
+              })}\n\n`);
+              controller.close();
+            }
+          }
+        },
+        cancel() {
+          isAborted = true;
+          abortController.abort();
+        }
+      });
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        },
+      });
+    }
+
+    // =============================================================================
+    // AGENT MODE: Full implementation flow with code generation and file writing
+    // =============================================================================
+    
+    // Detect intent and target file (only for Agent Mode)
+    const intent = detectIntent(trimmedMessage);
 
     const stream = new ReadableStream({
       async start(controller) {
@@ -765,10 +911,8 @@ export async function POST(
           }
 
           // Step 3: Planning / Thinking
-          // Use mode-based system prompt with memory context
-          const systemPrompt = chatMode === 'chat' 
-            ? buildSystemPrompt('chat', memoryLane)
-            : getSystemPrompt(intent.type, hasContext);
+          // Use Agent Mode system prompt with intent and memory context
+          const systemPrompt = getSystemPrompt(intent.type, hasContext);
           
           // Send planning information based on intent
           const planningInfo: Record<string, string> = {
@@ -795,7 +939,7 @@ export async function POST(
           });
           
           // Send initial thinking output
-          sendThinking(controller, `🎯 **Goal**: ${userMessage.slice(0, 100)}${userMessage.length > 100 ? '...' : ''}`);
+          sendThinking(controller, `🎯 **Goal**: ${trimmedMessage.slice(0, 100)}${trimmedMessage.length > 100 ? '...' : ''}`);
           
           if (intent.targetFile) {
             sendThinking(controller, `📁 **Target**: ${intent.targetFile}`);
@@ -819,25 +963,32 @@ export async function POST(
             type: 'step',
             step: 'thinking',
             status: 'start',
-            message: chatMode === 'chat' ? 'Thinking about your requirements...' : 'AI is reasoning...',
-            details: chatMode === 'chat' ? 'Planning mode active' : 'Formulating the best approach',
+            message: 'AI is reasoning...',
+            details: 'Formulating the best approach',
             icon: '🤔'
           });
 
-          // Build conversation messages for AI
+          // Build conversation messages for AI - filter out empty messages
           const conversationMessages: Array<{ role: 'user' | 'assistant'; content: string }> = history
             .reverse()
+            .filter(msg => msg.content && msg.content.trim().length > 0) // Filter empty messages
             .map(msg => ({
               role: msg.role as 'user' | 'assistant',
-              content: msg.content,
+              content: msg.content.trim(),
             }));
           
-          // Add current message with context
+          // Add current message with context - ensure it's never empty
           const enhancedMessage = contextPrompt 
-            ? `${contextPrompt}\n\n---\n\n## 💬 USER REQUEST\n${userMessage}`
-            : userMessage;
+            ? `${contextPrompt}\n\n---\n\n## 💬 USER REQUEST\n${trimmedMessage}`
+            : trimmedMessage;
           
-          conversationMessages.push({ role: 'user', content: enhancedMessage });
+          // Only add if we have content
+          if (enhancedMessage.length > 0) {
+            conversationMessages.push({ role: 'user', content: enhancedMessage });
+          } else {
+            // Fallback to a default message if somehow empty
+            conversationMessages.push({ role: 'user', content: 'Please help me with my project.' });
+          }
 
           // Short delay to show thinking step
           await new Promise(resolve => setTimeout(resolve, 300));
@@ -853,9 +1004,9 @@ export async function POST(
             type: 'step',
             step: 'generating',
             status: 'start',
-            message: chatMode === 'chat' ? 'Preparing response...' : 'Generating code...',
-            details: chatMode === 'chat' ? 'Analyzing your requirements' : 'Writing optimized, production-ready code',
-            icon: chatMode === 'chat' ? '💬' : '✨'
+            message: 'Generating code...',
+            details: 'Writing optimized, production-ready code',
+            icon: '✨'
           });
 
           // Stream from Claude using Vercel AI SDK with abort signal
@@ -907,7 +1058,8 @@ export async function POST(
             icon: '✨'
           });
 
-          // Step 5: Process and write files
+          // Step 5: Process and write files - Agent Mode only
+          // (Chat Mode returns early above and never reaches here)
           if (['generate', 'modify', 'improve', 'debug', 'test', 'docs'].includes(intent.type) && repoPath) {
             sendStep(controller, {
               type: 'step',
@@ -947,8 +1099,9 @@ export async function POST(
                   
                   // Check if file exists (update vs create)
                   let isUpdate = false;
+                  let existingContent = '';
                   try {
-                    await fs.access(fullPath);
+                    existingContent = await fs.readFile(fullPath, 'utf-8');
                     isUpdate = true;
                   } catch {}
                   
@@ -958,11 +1111,19 @@ export async function POST(
                   createdFiles.push(file.filePath);
                   successCount++;
                   
+                  // Send detailed file action info with before/after content for undo
+                  const actionDetails = isUpdate 
+                    ? `Modified existing file (${existingContent.length} → ${file.code.length} chars)`
+                    : `New file created (${file.code.length} chars)`;
+                  
                   controller.enqueue(
                     encoder.encode(`data: ${JSON.stringify({
                       type: 'file_created',
                       file: { path: file.filePath, name: file.name },
                       action: isUpdate ? 'updated' : 'created',
+                      details: actionDetails,
+                      beforeContent: isUpdate ? existingContent : null,
+                      afterContent: file.code,
                     })}\n\n`)
                   );
 
@@ -970,7 +1131,8 @@ export async function POST(
                     type: 'step',
                     step: 'file_write',
                     status: 'complete',
-                    message: isUpdate ? `Updated: ${file.filePath}` : `Created: ${file.filePath}`,
+                    message: isUpdate ? `📝 Updated: ${file.filePath}` : `✅ Created: ${file.filePath}`,
+                    details: actionDetails,
                     icon: isUpdate ? '📝' : '📄'
                   });
 
@@ -980,7 +1142,7 @@ export async function POST(
                     type: 'step',
                     step: 'file_write',
                     status: 'error',
-                    message: `Failed: ${file.filePath}`,
+                    message: `❌ Failed: ${file.filePath}`,
                     details: err instanceof Error ? err.message : 'Unknown error',
                     icon: '❌'
                   });
@@ -1092,8 +1254,9 @@ export async function POST(
               });
             }
           }
+          // Note: Chat Mode returns early above and never reaches here
 
-          // Final step: Complete
+          // Final step: Complete (Agent Mode only)
           sendStep(controller, {
             type: 'step',
             step: 'complete',
@@ -1111,25 +1274,17 @@ export async function POST(
             content: fullResponse,
             toolCalls: createdFiles.length > 0 ? [{ files: createdFiles }] : null,
             toolResults: JSON.stringify({ 
-              mode: chatMode, 
+              mode: 'agent', 
               filesCreated: createdFiles 
             }),
           }).then(() => {}).catch(console.error);
-
-          // Send updated requirements if in chat mode
-          if (chatMode === 'chat' && memoryLane.requirements) {
-            safeEnqueue(controller, `data: ${JSON.stringify({
-              type: 'requirements_updated',
-              requirements: memoryLane.requirements,
-            })}\n\n`);
-          }
 
           // Send completion
           safeEnqueue(controller, `data: ${JSON.stringify({
             type: 'done',
             conversationId: conversation.id,
             filesCreated: createdFiles.length,
-            mode: chatMode,
+            mode: 'agent',
             requirements: memoryLane.requirements,
           })}\n\n`);
 

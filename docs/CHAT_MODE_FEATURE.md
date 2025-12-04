@@ -4,12 +4,27 @@ This document describes the Chat Mode and Memory Lane feature that enables intel
 
 ## Overview
 
-The chat system supports two distinct modes:
+The chat system supports two **strictly separated** modes:
 
-1. **Chat Mode (Planning)** - Discuss and plan your project with AI
-2. **Agent Mode (Building)** - AI implements code based on your requirements
+1. **Chat Mode 💬 (Planning & Discussion)** - Discuss, plan, and explain - NO code generation
+2. **Agent Mode 🤖 (Implementation)** - AI implements code based on planning phase context
 
-Both modes share a **Memory Lane** that preserves context across the conversation, allowing AI to remember what was discussed and make informed decisions.
+Both modes share a **Memory Lane** that preserves context across the conversation, allowing Agent Mode to use everything discussed in Chat Mode.
+
+## Key Principles
+
+### Strict Mode Separation
+
+- **Chat Mode is READ-ONLY**: The AI will NEVER generate code, code blocks, or file changes in Chat Mode, regardless of what the user asks
+- **Agent Mode uses Chat Context**: When switching to Agent Mode, the AI has full context of all planning discussions and can implement based on that
+- **No Keyword-Based Switching**: Mode is controlled ONLY by the UI toggle button, not by message content
+
+### Why This Separation?
+
+1. **Clear Expectations**: Users know exactly what to expect from each mode
+2. **Better Planning**: Chat Mode encourages thorough planning before implementation
+3. **Context Preservation**: Agent Mode has rich context from planning discussions
+4. **Avoid Accidental Changes**: No code is generated unless explicitly in Agent Mode
 
 ## Architecture
 
@@ -17,8 +32,9 @@ Both modes share a **Memory Lane** that preserves context across the conversatio
 ┌─────────────────────────────────────────────────────────────┐
 │                       User Interface                         │
 │  ┌─────────────┐    ┌─────────────┐                        │
-│  │  Chat Mode  │    │ Agent Mode  │   Mode Toggle          │
-│  │  (Planning) │    │ (Building)  │                        │
+│  │  Chat Mode  │ ←→ │ Agent Mode  │   Toggle Switch        │
+│  │    💬       │    │    🤖       │                        │
+│  │ (Read-Only) │    │   (Build)   │                        │
 │  └─────────────┘    └─────────────┘                        │
 └─────────────────────────┬───────────────────────────────────┘
                           │
@@ -27,32 +43,46 @@ Both modes share a **Memory Lane** that preserves context across the conversatio
 │                    Chat Memory Service                       │
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │                   Memory Lane                         │  │
-│  │  • Short-term memory (recent messages)               │  │
-│  │  • Project requirements                              │  │
+│  │  • Short-term memory (last 15 messages)              │  │
+│  │  • Long-term summary (older conversations)           │  │
+│  │  • Project requirements (extracted automatically)    │  │
 │  │  • Key decisions made                                │  │
-│  │  • Implemented features                              │  │
-│  │  • Conversation summary                              │  │
+│  │  • Implemented features tracking                     │  │
+│  │  • Recent files created                              │  │
 │  └──────────────────────────────────────────────────────┘  │
 └─────────────────────────┬───────────────────────────────────┘
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      AI Model (Claude)                       │
-│  • Mode-specific system prompts                             │
+│  • Mode-specific system prompts (strictly enforced)         │
 │  • Context-aware responses                                  │
-│  • Requirement extraction                                   │
+│  • Automatic requirement extraction                         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## Chat Modes
 
-### Chat Mode (Planning)
+### Chat Mode 💬 (Planning & Discussion)
 
-In Chat Mode, AI acts as a helpful consultant:
+**What it DOES:**
 - Asks clarifying questions about your project
 - Helps think through requirements and features
 - Provides suggestions based on best practices
-- Does NOT generate code (yet)
+- Explains existing code in the project (read-only)
+- Discusses architecture and design decisions
+- Creates text-based plans and roadmaps
+
+**What it NEVER does (strictly enforced):**
+- Generate any code (not even examples)
+- Use code blocks (```)
+- Create or modify files
+- Show implementations or snippets
+
+**If user asks for code in Chat Mode:**
+> "I'm currently in **Chat Mode** 💬 which is designed for planning and discussion only. I cannot write or generate code in this mode.
+> 
+> To implement what we've discussed, please **switch to Agent Mode** 🤖 using the toggle button at the bottom of the chat, and I'll help bring your ideas to life with working code!"
 
 **Example Conversation:**
 ```
@@ -70,22 +100,43 @@ AI: Perfect! So we're building:
     - Pages: Home, Blog posts, About, Contact
     - Features: Newsletter signup
     
-    Ready to start building? Switch to Agent Mode!
+    We've got a solid plan! Ready to start building? 
+    Switch to **Agent Mode** 🤖 using the toggle, and I'll implement your blog step by step!
+
+User: Create the homepage
+
+AI: I'm in Chat Mode 💬 which is for planning only. I can't generate code here.
+    To create the homepage, please switch to Agent Mode 🤖 using the toggle button!
 ```
 
-### Agent Mode (Building)
+### Agent Mode 🤖 (Implementation)
 
-In Agent Mode, AI is an expert developer:
+**What it DOES:**
 - Generates production-ready code
-- Follows requirements from the planning phase
+- Uses ALL context from previous Chat Mode discussions
 - Creates files systematically
 - Uses the tech stack (Next.js, TypeScript, Tailwind)
+- Implements features one at a time
+- Builds upon existing code
+
+**Context from Chat Mode:**
+When you switch to Agent Mode, the AI has access to:
+- Full conversation summary
+- Extracted requirements (project type, pages, features, styling)
+- Key decisions you made during planning
+- Already implemented features
+- Recent files created
 
 **Example:**
 ```
-User: Start building the homepage
+User: (switches to Agent Mode) implement it
 
-AI: I'll create a modern homepage for your blog.
+AI: Based on our planning discussion, I'll start implementing your 
+    modern minimalist blog with:
+    - Home, About, Contact pages
+    - Newsletter signup feature
+    
+    Starting with the homepage...
 
 📄 Creating: app/page.tsx
 [Code is generated and saved]
